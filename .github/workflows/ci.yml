@@ -35,6 +35,10 @@ jobs:
             cc: aarch64-linux-gnu-gcc
     env:
       GOTOOLCHAIN: auto
+    # Container jobs default to sh; the Build step uses bash substring syntax.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Install cross compiler
