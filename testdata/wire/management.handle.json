@@ -1,9 +1,9 @@
 {
   "Method": "GET",
-  "Path": "/v0/resource/plugins/cliproxy-costs/api/v1/requests",
+  "Path": "/v0/management/cliproxy-costs/v1/requests",
   "Headers": {
     "Authorization": [
-      "Bearer <read token>"
+      "Bearer <management key>"
     ],
     "Accept": [
       "*/*"
@@ -15,5 +15,5 @@
     ]
   },
   "Body": null,
-  "host_callback_id": "cb-3"
+  "Plugin": "cliproxy-costs"
 }

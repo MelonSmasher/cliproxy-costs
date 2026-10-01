@@ -25,7 +25,6 @@ A complete annotated example is in [`examples/config.yaml`](../examples/config.y
 | `pricing.overrides` | `{}` | Manual rate cards keyed by `<catalog provider>/<model>` or by client model id. Keys `input`, `output`, `cache_read`, `cache_write` (USD per 1M tokens) and optional `tiers: [{above-prompt-tokens, input, …}]`. |
 | `inject.body` | `true` | Add `usage.cost` / `usage.cost_details` to response bodies. |
 | `inject.headers` | `true` | Add `X-CliProxy-Pricing` / `X-CliProxy-Cost-USD`. |
-| `read-api.token-env` | `CLIPROXY_COSTS_READ_TOKEN` | Env var holding the read-API bearer token (≥ 32 bytes; otherwise the read API answers `503 read_api_disabled`). |
 | `clients.fingerprint-secret-env` | `CLIPROXY_COSTS_HMAC_SECRET` | Env var holding the HMAC secret for client fingerprints. Unset → fingerprints are disabled (`client` is `null`). |
 | `clients.labels` | `[]` | `[{fingerprint, label, inject}]`. `inject: false` disables cost injection for that client. |
 | `subscriptions` | `[]` | `[{credential, label, usd-per-month}]` for the dashboard value panel. `credential` is the 16-hex CPA auth index. |
@@ -57,12 +56,18 @@ ledger database and survives restarts and feed outages.
 ## Secrets
 
 Secrets are read only from the environment of the CPA process, never from the
-config file. Generate them with, for example, `openssl rand -hex 32`. The
-values are re-read on every config reload.
+config file. Generate them with, for example, `openssl rand -hex 32`. The only
+one is the client-fingerprint secret (`clients.fingerprint-secret-env`). Data
+access needs no plugin secret: every data endpoint is a CPA management route,
+so CPA's management key protects it.
 
-Changing the fingerprint secret changes every client fingerprint from then on;
-the dashboard shows a notice when the secret differs from the one the ledger
-was created with.
+## Removed keys
+
+`read-api` (and `read-api.token-env`) belonged to the read-token API, which was
+removed: CPA's plugin store allows only static files under
+`/v0/resource/plugins/`. The key still loads, so an existing config keeps
+working, but it does nothing and the plugin logs a warning; delete it and the
+`CLIPROXY_COSTS_READ_TOKEN` environment variable.
 
 ## Model resolution
 

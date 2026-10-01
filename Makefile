@@ -1,14 +1,17 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo 0.0.0-dev)
+GOOS    ?= $(shell go env GOOS)
 GOARCH  ?= $(shell go env GOARCH)
-OUT     ?= dist/linux/$(GOARCH)/cliproxy-costs.so
+# CPA's plugin installer expects the platform's native library suffix.
+EXT     := $(if $(filter darwin,$(GOOS)),dylib,$(if $(filter windows,$(GOOS)),dll,so))
+OUT     ?= dist/$(GOOS)/$(GOARCH)/cliproxy-costs.$(EXT)
 export GOTOOLCHAIN ?= auto
 
 .PHONY: build test vet check clean
 
 build:
-	CGO_ENABLED=1 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -buildmode=c-shared \
+	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -buildmode=c-shared \
 		-ldflags "-s -w -X main.version=$(VERSION)" -o $(OUT) .
-	rm -f $(OUT:.so=.h)
+	rm -f $(basename $(OUT)).h
 
 test:
 	go test -race ./...

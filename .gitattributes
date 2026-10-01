@@ -1,0 +1,6 @@
+# Windows checkouts would otherwise get CRLF: gofmt flags every file and the
+# byte-exact golden tests (docs/examples) and embedded web assets differ.
+* text=auto eol=lf
+*.so binary
+*.dylib binary
+*.dll binary

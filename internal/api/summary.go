@@ -161,7 +161,7 @@ func timeKey(group string, t time.Time, loc *time.Location) string {
 	return t.Format("2006-01-02")
 }
 
-func summary(ctx context.Context, v *View, q url.Values, admin bool) (any, error) {
+func summary(ctx context.Context, v *View, q url.Values) (any, error) {
 	now := v.Now()
 	since, until, err := parseRange(q, now)
 	if err != nil {

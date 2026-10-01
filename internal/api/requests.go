@@ -64,7 +64,7 @@ func optStr(s string) *string {
 	return new(s)
 }
 
-func toAttempt(r store.Row, admin, withTrace bool) attempt {
+func toAttempt(r store.Row, withTrace bool) attempt {
 	a := attempt{
 		RequestID:     r.RequestID,
 		RequestedAt:   Timestamp(r.RequestedAtMS),
@@ -86,9 +86,7 @@ func toAttempt(r store.Row, admin, withTrace bool) attempt {
 	if withTrace {
 		a.TraceID = r.TraceID
 	}
-	if admin {
-		a.AuthID = optStr(r.AuthID)
-	}
+	a.AuthID = optStr(r.AuthID)
 	if r.CTotal != nil {
 		a.Cost = &costBreakdown{Total: *r.CTotal, Input: deref(r.CInput), CacheRead: deref(r.CCacheRead), CacheWrite: deref(r.CCacheWrite), Output: deref(r.COutput)}
 	}
@@ -129,7 +127,7 @@ func uuidV7Time(s string) (time.Time, bool) {
 	return time.UnixMilli(ms), true
 }
 
-func requests(ctx context.Context, v *View, q url.Values, admin bool) (any, error) {
+func requests(ctx context.Context, v *View, q url.Values) (any, error) {
 	traceIDs := splitList(q, "trace_id")
 	requestIDs := splitList(q, "request_id")
 	switch {
@@ -138,23 +136,23 @@ func requests(ctx context.Context, v *View, q url.Values, admin bool) (any, erro
 	case len(traceIDs)+len(requestIDs) > 100:
 		return nil, badRequest("at most 100 ids per request")
 	case len(traceIDs) > 0:
-		return byTrace(ctx, v, traceIDs, admin)
+		return byTrace(ctx, v, traceIDs)
 	case len(requestIDs) > 0:
-		return byRequest(ctx, v, requestIDs, admin)
+		return byRequest(ctx, v, requestIDs)
 	case q.Get("recent") != "":
-		return recent(ctx, v, q, admin)
+		return recent(ctx, v, q)
 	case q.Get("top") != "":
-		return top(ctx, v, q, admin)
+		return top(ctx, v, q)
 	}
 	return nil, badRequest("one of trace_id, request_id, recent or top is required")
 }
 
-func buildTrace(id string, rows []store.Row, admin bool, v *View) trace {
+func buildTrace(id string, rows []store.Row, v *View) trace {
 	t := trace{TraceID: id, Attempts: make([]attempt, 0, len(rows))}
 	var sum float64
 	priced := false
 	for _, r := range rows {
-		t.Attempts = append(t.Attempts, toAttempt(r, admin, false))
+		t.Attempts = append(t.Attempts, toAttempt(r, false))
 		if r.CTotal != nil {
 			sum += *r.CTotal
 			priced = true
@@ -175,7 +173,7 @@ func buildTrace(id string, rows []store.Row, admin bool, v *View) trace {
 	return t
 }
 
-func byTrace(ctx context.Context, v *View, ids []string, admin bool) (any, error) {
+func byTrace(ctx context.Context, v *View, ids []string) (any, error) {
 	norm := make([]string, len(ids))
 	for i, id := range ids {
 		norm[i] = NormalizeTraceID(id)
@@ -195,7 +193,7 @@ func byTrace(ctx context.Context, v *View, ids []string, admin bool) (any, error
 			continue
 		}
 		seen[id] = true
-		out = append(out, buildTrace(id, grouped[id], admin, v))
+		out = append(out, buildTrace(id, grouped[id], v))
 	}
 	return struct {
 		Schema int     `json:"schema"`
@@ -203,7 +201,7 @@ func byTrace(ctx context.Context, v *View, ids []string, admin bool) (any, error
 	}{schemaVersion, out}, nil
 }
 
-func byRequest(ctx context.Context, v *View, ids []string, admin bool) (any, error) {
+func byRequest(ctx context.Context, v *View, ids []string) (any, error) {
 	out := make([]trace, 0, len(ids))
 	for _, id := range ids {
 		rows, err := v.Store.ByRequest(ctx, id)
@@ -214,7 +212,7 @@ func byRequest(ctx context.Context, v *View, ids []string, admin bool) (any, err
 		if len(rows) > 0 {
 			traceID = rows[0].TraceID
 		}
-		t := buildTrace(traceID, rows, admin, v)
+		t := buildTrace(traceID, rows, v)
 		if len(rows) == 0 {
 			t.Status = "pending"
 		}
@@ -226,7 +224,7 @@ func byRequest(ctx context.Context, v *View, ids []string, admin bool) (any, err
 	}{schemaVersion, out}, nil
 }
 
-func recent(ctx context.Context, v *View, q url.Values, admin bool) (any, error) {
+func recent(ctx context.Context, v *View, q url.Values) (any, error) {
 	n, err := strconv.Atoi(q.Get("recent"))
 	if err != nil || n < 1 || n > 200 {
 		return nil, badRequest("recent must be 1..200")
@@ -251,7 +249,7 @@ func recent(ctx context.Context, v *View, q url.Values, admin bool) (any, error)
 	}
 	out := make([]attempt, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, toAttempt(r, admin, true))
+		out = append(out, toAttempt(r, true))
 	}
 	var next *string
 	if len(rows) == n {
@@ -265,7 +263,7 @@ func recent(ctx context.Context, v *View, q url.Values, admin bool) (any, error)
 }
 
 // top returns the most expensive priced raw attempts in range.
-func top(ctx context.Context, v *View, q url.Values, admin bool) (any, error) {
+func top(ctx context.Context, v *View, q url.Values) (any, error) {
 	n, err := strconv.Atoi(q.Get("top"))
 	if err != nil || n < 1 || n > 100 {
 		return nil, badRequest("top must be 1..100")
@@ -280,7 +278,7 @@ func top(ctx context.Context, v *View, q url.Values, admin bool) (any, error) {
 	}
 	out := make([]attempt, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, toAttempt(r, admin, true))
+		out = append(out, toAttempt(r, true))
 	}
 	return struct {
 		Schema   int       `json:"schema"`

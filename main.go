@@ -59,6 +59,9 @@ import "C"
 import (
 	"fmt"
 	"sync/atomic"
+	// The dashboard sends its IANA zone (summary?tz=). Windows has no system
+	// zoneinfo and CPA hosts carry no Go install, so the database is embedded.
+	_ "time/tzdata"
 	"unsafe"
 
 	"github.com/MelonSmasher/cliproxy-costs/internal/abi"

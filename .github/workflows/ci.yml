@@ -11,28 +11,34 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - run: go vet ./...
+      # -race needs cgo; the Windows runner image ships MinGW gcc.
       - run: go test -race ./...
 
+  # Linux and Windows libraries. Debian bookworm (glibc 2.36) matches the CPA
+  # container base image; Windows is cross-built with MinGW in the same image.
   build:
     needs: test
     runs-on: ubuntu-latest
-    # Debian bookworm (glibc 2.36) matches the CPA container base image.
     container: golang:1.26-bookworm
     strategy:
       matrix:
         include:
-          - goarch: amd64
-            cc: gcc
-          - goarch: arm64
-            cc: aarch64-linux-gnu-gcc
+          - {goos: linux, goarch: amd64, cc: gcc, ext: so}
+          - {goos: linux, goarch: arm64, cc: aarch64-linux-gnu-gcc, ext: so, pkgs: gcc-aarch64-linux-gnu libc6-dev-arm64-cross}
+          - {goos: windows, goarch: amd64, cc: x86_64-w64-mingw32-gcc, ext: dll, pkgs: gcc-mingw-w64-x86-64}
     env:
       GOTOOLCHAIN: auto
     # Container jobs default to sh; the Build step uses bash substring syntax.
@@ -41,45 +47,81 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Install cross compiler
-        if: matrix.goarch == 'arm64'
-        run: apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Install tools
+        run: apt-get update && apt-get install -y --no-install-recommends file binutils binutils-mingw-w64-x86-64 ${{ matrix.pkgs }}
       - name: Build
-        env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CC: ${{ matrix.cc }}
         run: |
           version="0.0.0-dev+${GITHUB_SHA::12}"
           case "$GITHUB_REF" in refs/tags/v*) version="${GITHUB_REF#refs/tags/v}";; esac
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          go build -trimpath -buildmode=c-shared -ldflags "-s -w -X main.version=$version" \
-            -o dist/linux/${{ matrix.goarch }}/cliproxy-costs.so .
-          rm -f dist/linux/${{ matrix.goarch }}/cliproxy-costs.h
+          make build GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CC=${{ matrix.cc }} VERSION="$version"
       - name: Check artifact
         run: |
-          apt-get update && apt-get install -y --no-install-recommends file binutils
-          file dist/linux/${{ matrix.goarch }}/cliproxy-costs.so
-          file dist/linux/${{ matrix.goarch }}/cliproxy-costs.so | grep -q "$([ ${{ matrix.goarch }} = arm64 ] && echo aarch64 || echo x86-64)"
-          nm -D dist/linux/${{ matrix.goarch }}/cliproxy-costs.so | grep -q ' T cliproxy_plugin_init$'
+          lib=dist/${{ matrix.goos }}/${{ matrix.goarch }}/cliproxy-costs.${{ matrix.ext }}
+          file "$lib"
+          # Not `cmd | grep -q`: Actions runs bash with pipefail, grep -q exits on
+          # the first match and the still-writing producer dies of SIGPIPE (141).
+          has() { grep -E "$1" > /dev/null; }
+          case "${{ matrix.goos }}/${{ matrix.goarch }}" in
+            linux/amd64) file "$lib" | has x86-64; nm -D "$lib" | has ' T cliproxy_plugin_init$' ;;
+            linux/arm64) file "$lib" | has aarch64; nm -D "$lib" | has ' T cliproxy_plugin_init$' ;;
+            windows/amd64) file "$lib" | has 'PE32\+ executable \(DLL\).*x86-64'; x86_64-w64-mingw32-objdump -p "$lib" | has '\] cliproxy_plugin_init$' ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
-          name: cliproxy-costs-linux-${{ matrix.goarch }}
-          path: dist/linux/${{ matrix.goarch }}/cliproxy-costs.so
+          name: cliproxy-costs-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/${{ matrix.goos }}/${{ matrix.goarch }}/cliproxy-costs.${{ matrix.ext }}
+          if-no-files-found: error
+
+  # macOS libraries need Apple's toolchain; the arm64 runner's clang also
+  # targets x86_64 (Go passes -arch).
+  build-darwin:
+    needs: test
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    env:
+      GOTOOLCHAIN: auto
+      # Go 1.26's minimum; without it the cgo objects are tagged with the
+      # runner's macOS version and older hosts refuse to load the library.
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          version="0.0.0-dev+${GITHUB_SHA::12}"
+          case "$GITHUB_REF" in refs/tags/v*) version="${GITHUB_REF#refs/tags/v}";; esac
+          make build GOOS=darwin GOARCH=${{ matrix.goarch }} CC=clang VERSION="$version"
+      - name: Check artifact
+        run: |
+          lib=dist/darwin/${{ matrix.goarch }}/cliproxy-costs.dylib
+          file "$lib"
+          # grep without -q reads all input: no SIGPIPE under pipefail.
+          file "$lib" | grep "shared library $([ ${{ matrix.goarch }} = arm64 ] && echo arm64 || echo x86_64)" > /dev/null
+          nm -gU "$lib" | grep ' T _cliproxy_plugin_init$' > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cliproxy-costs-darwin-${{ matrix.goarch }}
+          path: dist/darwin/${{ matrix.goarch }}/cliproxy-costs.dylib
           if-no-files-found: error
 
   # Release assets in the layout CLIProxyAPI's plugin installer reads
   # (internal/pluginstore): one <id>_<version>_<goos>_<goarch>.zip per platform
-  # with <id>.so at the zip root, plus checksums.txt in sha256sum format.
-  # Non-library files in the zip are ignored by the installer, so the notices
-  # ride along. On PRs the same packaging runs with a dev version and is
-  # checked; only a v* tag publishes it.
+  # with the platform library (<id>.so / .dylib / .dll) at the zip root, plus
+  # checksums.txt in sha256sum format. Non-library files in the zip are
+  # ignored by the installer, so the notices ride along. On PRs the same
+  # packaging runs with a dev version and is checked; only a v* tag publishes.
   package:
-    needs: build
+    needs: [build, build-darwin]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      PLATFORMS: linux/amd64/so linux/arm64/so darwin/amd64/dylib darwin/arm64/dylib windows/amd64/dll
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -90,23 +132,26 @@ jobs:
           version=0.0.0
           case "$GITHUB_REF" in refs/tags/v*) version="${GITHUB_REF#refs/tags/v}";; esac
           mkdir release
-          for arch in amd64 arm64; do
+          for p in $PLATFORMS; do
+            IFS=/ read -r goos goarch ext <<< "$p"
+            lib="cliproxy-costs.$ext"
             stage=$(mktemp -d)
-            cp artifacts/cliproxy-costs-linux-$arch/cliproxy-costs.so LICENSE THIRD_PARTY_NOTICES.md "$stage/"
+            cp "artifacts/cliproxy-costs-$goos-$goarch/$lib" LICENSE THIRD_PARTY_NOTICES.md "$stage/"
             # -j: no directories; -X: no extra attributes.
-            (cd "$stage" && zip -q -j -X "$GITHUB_WORKSPACE/release/cliproxy-costs_${version}_linux_${arch}.zip" cliproxy-costs.so LICENSE THIRD_PARTY_NOTICES.md)
+            (cd "$stage" && zip -q -j -X "$GITHUB_WORKSPACE/release/cliproxy-costs_${version}_${goos}_${goarch}.zip" "$lib" LICENSE THIRD_PARTY_NOTICES.md)
           done
-          (cd release && sha256sum *.zip > checksums.txt)
+          (cd release && sha256sum -- *.zip > checksums.txt)
           echo "version=$version" >> "$GITHUB_ENV"
       - name: Check layout
         run: |
           cd release
           sha256sum -c checksums.txt
-          for arch in amd64 arm64; do
-            z="cliproxy-costs_${version}_linux_${arch}.zip"
+          for p in $PLATFORMS; do
+            IFS=/ read -r goos goarch ext <<< "$p"
+            z="cliproxy-costs_${version}_${goos}_${goarch}.zip"
             libs=$(unzip -Z1 "$z" | grep -E '\.(so|dylib|dll)$')
-            [ "$libs" = "cliproxy-costs.so" ] || { echo "$z: libraries in zip: $libs"; exit 1; }
-            ! unzip -Z1 "$z" | grep -q / || { echo "$z: nested paths"; exit 1; }
+            [ "$libs" = "cliproxy-costs.$ext" ] || { echo "$z: libraries in zip: $libs"; exit 1; }
+            ! unzip -Z1 "$z" | grep / > /dev/null || { echo "$z: nested paths"; exit 1; }
           done
           ls -l
       - if: startsWith(github.ref, 'refs/tags/v')

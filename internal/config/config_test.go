@@ -10,7 +10,7 @@ func TestDefaultsAndProviderMapMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Pricing.FeedURL != DefaultFeedURL || c.Retention.RawDays != 90 || c.ReadAPI.TokenEnv != "CLIPROXY_COSTS_READ_TOKEN" {
+	if c.Pricing.FeedURL != DefaultFeedURL || c.Retention.RawDays != 90 || len(c.Removed()) != 0 {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
 	if c.Pricing.ProviderMap["codex"] != "custom" || c.Pricing.ProviderMap["claude"] != "anthropic" {
@@ -26,7 +26,7 @@ func TestValidationErrors(t *testing.T) {
 		"unknown key":            "db_path: x\n",
 		"bad alias":              "pricing:\n  aliases: {a: nosl}\n",
 		"negative rate":          "pricing:\n  overrides: {m: {input: -1}}\n",
-		"bad env":                "read-api:\n  token-env: \"has space\"\n",
+		"bad env":                "clients:\n  fingerprint-secret-env: \"has space\"\n",
 		"bad label fp":           "clients:\n  labels: [{fingerprint: XYZ}]\n",
 		"bad family":             "pricing:\n  provider-families: {x: klingon}\n",
 		"bad feed url":           "pricing:\n  feed-url: ftp://x\n",
@@ -46,6 +46,18 @@ func TestValidationErrors(t *testing.T) {
 		} else if !strings.HasPrefix(err.Error(), "config: ") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// Configs written for the removed read-token API must keep loading: CPA
+// would otherwise refuse to start the plugin after an upgrade.
+func TestRemovedReadAPIBlockStillLoads(t *testing.T) {
+	c, err := Parse([]byte("read-api:\n  token-env: CLIPROXY_COSTS_READ_TOKEN\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Removed(); len(got) != 1 || got[0] != "read-api" {
+		t.Fatalf("removed keys %v", got)
 	}
 }
 
