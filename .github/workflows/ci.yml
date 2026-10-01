@@ -59,10 +59,13 @@ jobs:
         run: |
           lib=dist/${{ matrix.goos }}/${{ matrix.goarch }}/cliproxy-costs.${{ matrix.ext }}
           file "$lib"
+          # Not `cmd | grep -q`: Actions runs bash with pipefail, grep -q exits on
+          # the first match and the still-writing producer dies of SIGPIPE (141).
+          has() { grep -E "$1" > /dev/null; }
           case "${{ matrix.goos }}/${{ matrix.goarch }}" in
-            linux/amd64) file "$lib" | grep -q x86-64; nm -D "$lib" | grep -q ' T cliproxy_plugin_init$' ;;
-            linux/arm64) file "$lib" | grep -q aarch64; nm -D "$lib" | grep -q ' T cliproxy_plugin_init$' ;;
-            windows/amd64) file "$lib" | grep -q 'PE32+ executable (DLL).*x86-64'; x86_64-w64-mingw32-objdump -p "$lib" | grep -qE '\] cliproxy_plugin_init$' ;;
+            linux/amd64) file "$lib" | has x86-64; nm -D "$lib" | has ' T cliproxy_plugin_init$' ;;
+            linux/arm64) file "$lib" | has aarch64; nm -D "$lib" | has ' T cliproxy_plugin_init$' ;;
+            windows/amd64) file "$lib" | has 'PE32\+ executable \(DLL\).*x86-64'; x86_64-w64-mingw32-objdump -p "$lib" | has '\] cliproxy_plugin_init$' ;;
           esac
       - uses: actions/upload-artifact@v4
         with:
@@ -97,8 +100,9 @@ jobs:
         run: |
           lib=dist/darwin/${{ matrix.goarch }}/cliproxy-costs.dylib
           file "$lib"
-          file "$lib" | grep -q "shared library $([ ${{ matrix.goarch }} = arm64 ] && echo arm64 || echo x86_64)"
-          nm -gU "$lib" | grep -q ' T _cliproxy_plugin_init$'
+          # grep without -q reads all input: no SIGPIPE under pipefail.
+          file "$lib" | grep "shared library $([ ${{ matrix.goarch }} = arm64 ] && echo arm64 || echo x86_64)" > /dev/null
+          nm -gU "$lib" | grep ' T _cliproxy_plugin_init$' > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: cliproxy-costs-darwin-${{ matrix.goarch }}
@@ -147,7 +151,7 @@ jobs:
             z="cliproxy-costs_${version}_${goos}_${goarch}.zip"
             libs=$(unzip -Z1 "$z" | grep -E '\.(so|dylib|dll)$')
             [ "$libs" = "cliproxy-costs.$ext" ] || { echo "$z: libraries in zip: $libs"; exit 1; }
-            ! unzip -Z1 "$z" | grep -q / || { echo "$z: nested paths"; exit 1; }
+            ! unzip -Z1 "$z" | grep / > /dev/null || { echo "$z: nested paths"; exit 1; }
           done
           ls -l
       - if: startsWith(github.ref, 'refs/tags/v')
