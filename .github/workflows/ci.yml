@@ -69,8 +69,13 @@ jobs:
           path: dist/linux/${{ matrix.goarch }}/cliproxy-costs.so
           if-no-files-found: error
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  # Release assets in the layout CLIProxyAPI's plugin installer reads
+  # (internal/pluginstore): one <id>_<version>_<goos>_<goarch>.zip per platform
+  # with <id>.so at the zip root, plus checksums.txt in sha256sum format.
+  # Non-library files in the zip are ignored by the installer, so the notices
+  # ride along. On PRs the same packaging runs with a dev version and is
+  # checked; only a v* tag publishes it.
+  package:
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -80,15 +85,31 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Collect
+      - name: Package
         run: |
+          version=0.0.0
+          case "$GITHUB_REF" in refs/tags/v*) version="${GITHUB_REF#refs/tags/v}";; esac
           mkdir release
           for arch in amd64 arm64; do
-            cp artifacts/cliproxy-costs-linux-$arch/cliproxy-costs.so release/cliproxy-costs-linux-$arch.so
+            stage=$(mktemp -d)
+            cp artifacts/cliproxy-costs-linux-$arch/cliproxy-costs.so LICENSE THIRD_PARTY_NOTICES.md "$stage/"
+            # -j: no directories; -X: no extra attributes.
+            (cd "$stage" && zip -q -j -X "$GITHUB_WORKSPACE/release/cliproxy-costs_${version}_linux_${arch}.zip" cliproxy-costs.so LICENSE THIRD_PARTY_NOTICES.md)
           done
-          (cd release && sha256sum *.so > SHA256SUMS)
-          # The .so embeds CLIProxyAPI-derived code and uPlot: ship their notices.
-          cp LICENSE THIRD_PARTY_NOTICES.md release/
-      - uses: softprops/action-gh-release@v2
+          (cd release && sha256sum *.zip > checksums.txt)
+          echo "version=$version" >> "$GITHUB_ENV"
+      - name: Check layout
+        run: |
+          cd release
+          sha256sum -c checksums.txt
+          for arch in amd64 arm64; do
+            z="cliproxy-costs_${version}_linux_${arch}.zip"
+            libs=$(unzip -Z1 "$z" | grep -E '\.(so|dylib|dll)$')
+            [ "$libs" = "cliproxy-costs.so" ] || { echo "$z: libraries in zip: $libs"; exit 1; }
+            ! unzip -Z1 "$z" | grep -q / || { echo "$z: nested paths"; exit 1; }
+          done
+          ls -l
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
         with:
           files: release/*

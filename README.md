@@ -41,10 +41,12 @@ Non-goals: billing or blocking requests; pricing image/audio/search tariffs
 
 ## Install
 
-1. Download `cliproxy-costs-linux-<arch>.so` from the releases page and verify
-   it against `SHA256SUMS`.
-2. Put it at `<plugins dir>/linux/<arch>/cliproxy-costs.so` (the file name is
-   the plugin id and must stay `cliproxy-costs.so`).
+1. Download `cliproxy-costs_<version>_linux_<arch>.zip` from the releases page,
+   verify it against `checksums.txt`, and unzip it.
+2. Put `cliproxy-costs.so` at `<plugins dir>/linux/<arch>/cliproxy-costs.so`
+   (the file name is the plugin id and must stay `cliproxy-costs.so`). The
+   release zips use the CLIProxyAPI plugin-store layout, so CPA's own
+   installer can also install them from a release.
 3. Add the plugin block to CPA's `config.yaml`, see
    [`examples/config.yaml`](examples/config.yaml):
 
