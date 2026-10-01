@@ -212,11 +212,12 @@ func (s *Store) QueueDepth() int { return len(s.ch) }
 // LastWriteError returns the most recent batch error ("" when none).
 func (s *Store) LastWriteError() string { return s.lastErr.Load().(string) }
 
-// Close stops accepting work, lets the writer drain the queue until deadline,
-// then closes both pools. Rows still queued at the deadline are counted as
-// dropped. When the writer is still mid-batch at the deadline, Close returns
-// without waiting for it: the batch commits on its own (bounded by the
-// writeBatch timeout) and the database is closed when it finishes. Idempotent.
+// Close stops accepting work, lets the writer drain the queue, checkpoints
+// the WAL and closes both pools, all within one deadline measured from entry.
+// Rows still queued when the writer runs out of time are counted as dropped.
+// When the writer is still mid-batch at the deadline, Close returns without
+// waiting for it: the batch commits on its own (bounded by the writeBatch
+// timeout) and the write pool is closed when it finishes. Idempotent.
 func (s *Store) Close(deadline time.Duration) error {
 	s.mu.Lock()
 	if s.closed {
@@ -226,9 +227,12 @@ func (s *Store) Close(deadline time.Duration) error {
 	s.closed = true
 	close(s.ch)
 	s.mu.Unlock()
+	// One budget for the whole shutdown: draining and the checkpoint share it.
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
 	select {
 	case <-s.done:
-	case <-time.After(deadline):
+	case <-ctx.Done():
 		// The writer holds the only write connection for its current batch;
 		// anything after it in the queue is dropped.
 		for it := range s.ch {
@@ -237,17 +241,21 @@ func (s *Store) Close(deadline time.Duration) error {
 			}
 		}
 		// The checkpoint and Close would both wait for that connection, so
-		// hand them to the writer's exit instead of blocking here.
+		// hand the close to the writer's exit instead of blocking here.
 		go func() {
 			<-s.done
 			_ = s.w.Close()
 		}()
 		return s.r.Close()
 	}
-	// The writer is idle: the checkpoint gets the connection at once.
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
-	_, _ = s.w.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
-	cancel()
+	// The writer finished in time. PASSIVE copies what it can without
+	// waiting for readers: TRUNCATE (and RESTART/FULL) sit in SQLite's busy
+	// handler for up to busy_timeout, which the context cannot interrupt, so
+	// they would blow the deadline whenever a reader is open. Anything left
+	// in the WAL is replayed on the next open.
+	if ctx.Err() == nil {
+		_, _ = s.w.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+	}
 	errW := s.w.Close()
 	errR := s.r.Close()
 	return errors.Join(errW, errR)

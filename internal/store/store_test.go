@@ -140,6 +140,49 @@ func TestCloseHonoursDeadlineWhileWriterIsBusy(t *testing.T) {
 	})
 }
 
+// The deadline covers the whole shutdown: a writer that finishes just before
+// it must not hand the checkpoint a fresh full deadline, even when an open
+// read transaction keeps the TRUNCATE checkpoint from completing.
+func TestCloseDeadlineCoversDrainAndCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "l.db")
+	s := open(t, path, Options{Capacity: 100, BatchSize: 1, Flush: time.Millisecond})
+	cost := 1.0
+	s.Enqueue(Item{Row: row("w", time.Now().UnixMilli(), &cost)})
+	waitFor(t, func() bool { return count(t, s) == 1 })
+	// A separate connection holding a read snapshot: TRUNCATE has to wait
+	// for it (up to busy_timeout) before it can reset the WAL.
+	other, err := Open(context.Background(), path, Options{Capacity: 1, BatchSize: 1, Flush: time.Millisecond}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close(time.Second)
+	tx, err := other.r.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var n int64
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the writer busy for most of the deadline, then let it finish.
+	conn, err := s.w.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Enqueue(Item{Row: row("late", time.Now().UnixMilli(), &cost)})
+	const deadline = 600 * time.Millisecond
+	go func() {
+		time.Sleep(deadline - 150*time.Millisecond)
+		_ = conn.Close()
+	}()
+	start := time.Now()
+	_ = s.Close(deadline)
+	if took := time.Since(start); took > deadline+300*time.Millisecond {
+		t.Fatalf("Close took %v for a %v deadline", took, deadline)
+	}
+}
+
 func TestRetentionKeepsRollups(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "l.db"), Options{Capacity: 100, BatchSize: 1, Flush: time.Millisecond})
 	defer s.Close(time.Second)
