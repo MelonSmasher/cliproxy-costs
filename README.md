@@ -36,15 +36,17 @@ Non-goals: billing or blocking requests; pricing image/audio/search tariffs
 - CLIProxyAPI v8 with native plugin ABI 1 / JSON schema 6 (developed against
   commit `e5b5a1c`). CPA Home mode is not supported.
 - Plugins run in-process; upgrading the plugin requires a CPA restart.
-- Linux amd64 and arm64, glibc ≥ 2.34 (release builds are made on Debian
-  bookworm, the CPA container base).
+- Linux amd64 and arm64 (glibc ≥ 2.34; release builds are made on Debian
+  bookworm, the CPA container base), macOS amd64 and arm64 (12 or later), and
+  Windows amd64.
 
 ## Install
 
-1. Download `cliproxy-costs_<version>_linux_<arch>.zip` from the releases page,
+1. Download `cliproxy-costs_<version>_<os>_<arch>.zip` from the releases page,
    verify it against `checksums.txt`, and unzip it.
-2. Put `cliproxy-costs.so` at `<plugins dir>/linux/<arch>/cliproxy-costs.so`
-   (the file name is the plugin id and must stay `cliproxy-costs.so`). The
+2. Put the library at `<plugins dir>/<os>/<arch>/cliproxy-costs.<ext>` (`.so`
+   on Linux, `.dylib` on macOS, `.dll` on Windows; the base name is the plugin
+   id and must stay `cliproxy-costs`). The
    release zips use the CLIProxyAPI plugin-store layout, so CPA's own
    installer can also install them from a release.
 3. Add the plugin block to CPA's `config.yaml`, see
@@ -138,8 +140,11 @@ make check                    # vet, race tests, build for the host arch
 make build GOARCH=arm64 CC=aarch64-linux-gnu-gcc
 ```
 
-Output: `dist/linux/<arch>/cliproxy-costs.so`. For glibc compatibility with
-the CPA image, build inside `golang:1.26-bookworm` as CI does.
+Output: `dist/<os>/<arch>/cliproxy-costs.{so,dylib,dll}`. For glibc
+compatibility with the CPA image, build Linux inside `golang:1.26-bookworm` as
+CI does; CI cross-builds Windows there too
+(`make build GOOS=windows CC=x86_64-w64-mingw32-gcc`) and builds macOS on a
+macOS runner.
 
 ## Layout
 

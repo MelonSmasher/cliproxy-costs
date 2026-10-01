@@ -5,7 +5,7 @@
 # (CPA's management key), so the plugin itself needs no API token.
 plugins:
   enabled: true
-  dir: plugins                       # the library goes in plugins/linux/<arch>/cliproxy-costs.so
+  dir: plugins                       # library: plugins/<os>/<arch>/cliproxy-costs.{so,dylib,dll}
   configs:
     cliproxy-costs:
       enabled: true
