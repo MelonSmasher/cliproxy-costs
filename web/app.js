@@ -445,6 +445,15 @@
     $("fx-notice").hidden = true;
     $("fx-footer").hidden = true;
     destroyCharts();
+    // Everything rendered from the previous credential's responses (admin-only
+    // auth_id in quota tooltips, lookup rows, the attempt dialog) is dropped
+    // before anyone else signs in, not just hidden.
+    state.lookupTraces = null;
+    state.detailTrace = null;
+    $("lookup-id").value = "";
+    for (const id of ["lookup-result", "quota", "top", "reliability", "value", "notices", "health", "unpriced", "attention", "detail-body"]) clear($(id));
+    for (const id of ["recent", "by-credential", "by-client", "models"]) clear($(id).querySelector("tbody"));
+    if ($("detail").open) $("detail").close();
     const msg = $("auth-msg");
     msg.hidden = !message;
     msg.textContent = message || "";
