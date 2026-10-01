@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "generated_at": "2026-09-30T18:00:00.000Z",
+  "stale_after_ms": 1800000,
+  "credentials": [
+    {
+      "credential": "c0ffee00c0ffee00",
+      "provider": "codex",
+      "label": "codex c0ffee",
+      "observed_at": "2026-09-30T17:56:39.386Z",
+      "stale": false,
+      "plan": "pro",
+      "windows": [
+        {
+          "id": "codex:primary:300",
+          "label": "5 Hour",
+          "duration_ms": 18000000,
+          "used_percent": 42,
+          "used_fraction": 0.42,
+          "resets_at": "2026-09-30T18:56:39.000Z",
+          "status": "ok"
+        },
+        {
+          "id": "codex:secondary:10080",
+          "label": "7 Day",
+          "duration_ms": 604800000,
+          "used_percent": 17,
+          "used_fraction": 0.17,
+          "resets_at": "2026-10-01T17:56:39.000Z",
+          "status": "ok"
+        }
+      ],
+      "credits": {
+        "has_credits": true,
+        "unlimited": false,
+        "balance": "12.50"
+      }
+    }
+  ]
+}

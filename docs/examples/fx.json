@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "base": "USD",
+  "source": "ecb",
+  "status": "ok",
+  "as_of": "2026-09-30",
+  "fetched_at": "2026-09-30T14:10:00.000Z",
+  "error": null,
+  "display_currency": "USD",
+  "currencies": [
+    "USD",
+    "EUR",
+    "CNY"
+  ],
+  "rates": {
+    "CNY": 6.70454,
+    "EUR": 0.880669,
+    "USD": 1
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "RequestID": "5a7b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d",
+  "SourceFormat": "openai",
+  "Model": "priced-fixture",
+  "RequestedModel": "priced-fixture",
+  "Stream": false,
+  "RequestHeaders": {
+    "Authorization": [
+      "<redacted>"
+    ],
+    "Content-Type": [
+      "application/json"
+    ]
+  },
+  "ResponseHeaders": {
+    "Content-Type": [
+      "application/json"
+    ]
+  },
+  "OriginalRequest": "eyJtb2RlbCI6InByaWNlZC1maXh0dXJlIiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6ImhpIn1dfQ==",
+  "RequestBody": "eyJtb2RlbCI6InByaWNlZC1maXh0dXJlIiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6ImhpIn1dfQ==",
+  "Body": "eyJpZCI6ImNoYXRjbXBsLWZha2UiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoxMDAwLCJjb21wbGV0aW9uX3Rva2VucyI6MTAwLCJ0b3RhbF90b2tlbnMiOjExMDAsInByb21wdF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjoyMDB9fX0=",
+  "StatusCode": 200,
+  "Metadata": {
+    "caller_scope": "3c2d0f6a5b4e8d7c1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081",
+    "generate": true,
+    "request_path": "/v1/chat/completions",
+    "requested_model": "priced-fixture",
+    "service_tier": ""
+  },
+  "host_callback_id": "cb-1"
+}

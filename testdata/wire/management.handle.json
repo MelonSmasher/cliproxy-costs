@@ -1,0 +1,19 @@
+{
+  "Method": "GET",
+  "Path": "/v0/resource/plugins/cliproxy-costs/api/v1/requests",
+  "Headers": {
+    "Authorization": [
+      "Bearer <read token>"
+    ],
+    "Accept": [
+      "*/*"
+    ]
+  },
+  "Query": {
+    "trace_id": [
+      "20260930135639-c0ffee00c0ffee00-01a0f376-1d58-7cd2-bbe4-d4caf71953fe"
+    ]
+  },
+  "Body": null,
+  "host_callback_id": "cb-3"
+}

@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "error": {
+    "code": "unauthorized",
+    "message": "missing or invalid read token"
+  }
+}

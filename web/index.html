@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>cliproxy-costs</title>
+<link rel="stylesheet" href="dashboard/app.css">
+<script src="dashboard/chart.js" defer></script>
+<script src="dashboard/app.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#app">Skip to dashboard</a>
+<header class="topbar">
+  <h1 class="brand">cliproxy-costs</h1>
+  <div class="controls" id="controls" hidden>
+    <label class="field">
+      <span>Range</span>
+      <select id="range">
+        <option value="7">7 days</option>
+        <option value="30" selected>30 days</option>
+        <option value="90">90 days</option>
+        <option value="365">365 days</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>Currency</span>
+      <select id="currency">
+        <option value="USD" selected>USD</option>
+      </select>
+    </label>
+    <button type="button" id="refresh" class="btn">Refresh</button>
+    <button type="button" id="signout" class="btn btn-ghost">Sign out</button>
+    <span class="updated muted" id="updated" aria-live="polite"></span>
+  </div>
+</header>
+
+<div class="banner" id="banner" role="alert" hidden></div>
+<div class="banner notice-fx" id="fx-notice" role="status" hidden></div>
+
+<main id="app" hidden>
+  <ul class="attention" id="attention" role="status" aria-label="Needs attention" hidden></ul>
+
+  <section class="kpis" id="kpis" aria-label="Key figures">
+    <div class="kpi" id="kpi-today" role="group" aria-labelledby="kpi-today-l"><div class="kpi-label" id="kpi-today-l">Today</div><div class="kpi-value">—</div><div class="kpi-sub">—</div></div>
+    <div class="kpi" id="kpi-week" role="group" aria-labelledby="kpi-week-l"><div class="kpi-label" id="kpi-week-l">This week</div><div class="kpi-value">—</div><div class="kpi-sub">—</div></div>
+    <div class="kpi" id="kpi-month" role="group" aria-labelledby="kpi-month-l"><div class="kpi-label" id="kpi-month-l">This month</div><div class="kpi-value">—</div><div class="kpi-sub">—</div></div>
+    <div class="kpi" id="kpi-range" role="group" aria-labelledby="kpi-range-l"><div class="kpi-label" id="kpi-range-l">Last 30 days</div><div class="kpi-value">—</div><div class="kpi-sub">—</div></div>
+    <div class="kpi" id="kpi-cache" role="group" aria-labelledby="kpi-cache-l"><div class="kpi-label" id="kpi-cache-l">Cache savings</div><div class="kpi-value">—</div><div class="kpi-sub">—</div></div>
+    <div class="kpi" id="kpi-value" role="group" aria-labelledby="kpi-value-l"><div class="kpi-label" id="kpi-value-l">Subscription value</div><div class="kpi-value">—</div><div class="kpi-sub">—</div></div>
+    <div class="kpi" id="kpi-failures" role="group" aria-labelledby="kpi-failures-l"><div class="kpi-label" id="kpi-failures-l">Failures</div><div class="kpi-value">—</div><div class="kpi-sub">—</div></div>
+  </section>
+
+  <section class="card span-12" id="card-quota" aria-labelledby="h-quota">
+    <div class="card-head">
+      <h2 id="h-quota">Subscription limits</h2>
+      <span class="muted small" id="quota-sub"></span>
+    </div>
+    <div class="gauges" id="quota"></div>
+  </section>
+
+  <section class="card span-12" id="card-spend" aria-labelledby="h-spend">
+    <div class="card-head">
+      <h2 id="h-spend">Spend over time</h2>
+      <div class="card-tools">
+        <label class="field">
+          <span>Stack by</span>
+          <select id="stack">
+            <option value="model" selected>Model</option>
+            <option value="provider">Provider</option>
+            <option value="credential">Credential</option>
+            <option value="client">Client</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Bucket</span>
+          <select id="bucket">
+            <option value="hour" selected>Hour</option>
+            <option value="day">Day</option>
+            <option value="week">Week</option>
+            <option value="month">Month</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <p class="card-sub muted" id="spend-sub"></p>
+    <div class="chart" id="chart-spend"></div>
+  </section>
+
+  <section class="card span-6" id="card-credentials" aria-labelledby="h-credentials">
+    <div class="card-head">
+      <h2 id="h-credentials">By credential</h2>
+    </div>
+    <div class="table-wrap">
+      <table class="data" id="by-credential">
+        <caption class="sr-only">Usage by credential</caption>
+        <thead>
+          <tr>
+            <th>Credential</th>
+            <th class="num">Requests</th>
+            <th class="num">Failed</th>
+            <th class="num opt">Cache hit</th>
+            <th class="num opt">Tokens</th>
+            <th class="num">Cost</th>
+            <th>Share</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="empty" id="by-credential-empty" hidden>No requests in this range.</p>
+  </section>
+
+  <section class="card span-6" id="card-clients" aria-labelledby="h-clients">
+    <div class="card-head">
+      <h2 id="h-clients">By client</h2>
+    </div>
+    <div class="table-wrap">
+      <table class="data" id="by-client">
+        <caption class="sr-only">Usage by client</caption>
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th class="num">Requests</th>
+            <th class="num">Failed</th>
+            <th class="num opt">Cache hit</th>
+            <th class="num opt">Tokens</th>
+            <th class="num">Cost</th>
+            <th>Share</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="empty" id="by-client-empty" hidden>No requests in this range.</p>
+  </section>
+
+  <section class="card span-7" id="card-top" aria-labelledby="h-top">
+    <div class="card-head">
+      <h2 id="h-top">Most expensive requests</h2>
+    </div>
+    <p class="card-sub muted" id="top-sub"></p>
+    <div id="top"></div>
+  </section>
+
+  <section class="card span-5" id="card-reliability" aria-labelledby="h-reliability">
+    <div class="card-head">
+      <h2 id="h-reliability">Failures</h2>
+      <button type="button" class="btn btn-ghost" id="show-failed">Show failed requests</button>
+    </div>
+    <p class="card-sub muted" id="reliability-sub"></p>
+    <div id="reliability"></div>
+  </section>
+
+  <section class="card span-12" id="card-tokens" aria-labelledby="h-tokens">
+    <div class="card-head">
+      <h2 id="h-tokens">Token mix &amp; cache</h2>
+    </div>
+    <p class="card-sub muted" id="tokens-sub"></p>
+    <div class="chart" id="chart-tokens"></div>
+  </section>
+
+  <section class="card span-12" id="card-models" aria-labelledby="h-models">
+    <div class="card-head">
+      <h2 id="h-models">Per model</h2>
+    </div>
+    <div class="table-wrap">
+      <table class="data sortable" id="models">
+        <caption class="sr-only">Usage by model</caption>
+        <thead>
+          <tr>
+            <th data-key="label" data-type="text">Model</th>
+            <th data-key="requests" class="num">Requests</th>
+            <th data-key="failed" class="num">Failed</th>
+            <th data-key="tokens" class="num">Tokens</th>
+            <th data-key="cache_hit" class="num opt">Cache hit</th>
+            <th data-key="cost" class="num">Cost</th>
+            <th data-key="saved" class="num opt">Cache saved</th>
+            <th data-key="per_req" class="num">Per request</th>
+            <th data-key="lat50" class="num">Latency p50</th>
+            <th data-key="lat95" class="num opt">Latency p95</th>
+            <th data-key="ttft50" class="num opt">TTFT p50</th>
+            <th data-key="ttft95" class="num opt">TTFT p95</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="empty" id="models-empty" hidden>No requests in this range.</p>
+  </section>
+
+  <section class="card span-7" id="card-value" aria-labelledby="h-value">
+    <div class="card-head">
+      <h2 id="h-value">Subscription value</h2>
+    </div>
+    <p class="card-sub muted" id="value-sub"></p>
+    <div id="value"></div>
+  </section>
+
+  <section class="card span-5" id="card-health" aria-labelledby="h-health">
+    <div class="card-head">
+      <h2 id="h-health">Pricing &amp; FX feeds, health</h2>
+    </div>
+    <div id="notices"></div>
+    <dl class="kv" id="health"></dl>
+    <h3>Unpriced / unsupported models</h3>
+    <div id="unpriced"></div>
+  </section>
+
+  <section class="card span-12" id="card-drill" aria-labelledby="h-drill">
+    <div class="card-head">
+      <h2 id="h-drill">Request drill-down</h2>
+    </div>
+    <form class="lookup" id="lookup" autocomplete="off">
+      <label class="field grow">
+        <span>Trace id, X-Cpa-Trace-Id or request id</span>
+        <input type="text" id="lookup-id" spellcheck="false" autocapitalize="off" required>
+      </label>
+      <button type="submit" class="btn">Look up</button>
+    </form>
+    <div id="lookup-result"></div>
+
+    <div class="card-head">
+      <h3>Recent requests</h3>
+      <label class="check"><input type="checkbox" id="recent-failed"> Failures only</label>
+    </div>
+    <div class="table-wrap">
+      <table class="data clickable" id="recent">
+        <caption class="sr-only">Recent requests</caption>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Model</th>
+            <th class="opt">Provider</th>
+            <th class="opt">Credential</th>
+            <th class="num">Tokens</th>
+            <th class="num">Cost</th>
+            <th class="opt num">Latency</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="empty" id="recent-empty" hidden>No recent requests.</p>
+    <div class="more">
+      <button type="button" class="btn btn-ghost" id="recent-more" hidden>Load more</button>
+    </div>
+  </section>
+</main>
+
+<footer class="footer muted small" id="fx-footer" hidden></footer>
+
+<dialog id="auth" class="modal">
+  <form id="auth-form" autocomplete="off">
+    <h2>Sign in</h2>
+    <p class="muted small">The token is kept in this page's memory only. Reloading the page forgets it.</p>
+    <p class="auth-msg" id="auth-msg" role="alert" hidden></p>
+    <fieldset class="modes">
+      <legend>Credential type</legend>
+      <label class="radio"><input type="radio" name="mode" value="admin" checked> Management key</label>
+      <label class="radio"><input type="radio" name="mode" value="read"> Read token</label>
+    </fieldset>
+    <label class="field">
+      <span id="auth-label">Management key</span>
+      <input type="password" id="auth-token" required autocomplete="off" spellcheck="false">
+    </label>
+    <div class="actions">
+      <button type="submit" class="btn">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="detail" class="modal wide">
+  <div class="modal-head">
+    <h2>Attempt</h2>
+    <button type="button" class="btn btn-ghost" id="detail-close" aria-label="Close">Close</button>
+  </div>
+  <dl class="kv" id="detail-body"></dl>
+  <div class="actions">
+    <button type="button" class="btn" id="detail-trace">Show whole trace</button>
+  </div>
+</dialog>
+</body>
+</html>
