@@ -1,0 +1,53 @@
+{
+  "RequestID": "8f0f6b4e-3a53-4f6e-9a1e-2f4c5d6e7a8b",
+  "TraceID": "01a0f376-1d58-7cd2-bbe4-d4caf71953fe",
+  "Provider": "openai-compatible-smoke",
+  "BaseURL": "https://upstream.example/v1",
+  "ExecutorType": "openai-compatible",
+  "Model": "priced-fixture",
+  "Alias": "priced-fixture",
+  "APIKey": "<client key>",
+  "SessionID": "derived:ctx:v1:0123456789abcdef",
+  "ParentSessionID": "",
+  "AuthID": "example-auth",
+  "AuthIndex": "c0ffee00c0ffee00",
+  "AuthType": "api_key",
+  "Source": "<upstream key>",
+  "ReasoningEffort": "",
+  "ServiceTier": "",
+  "ResponseServiceTier": "",
+  "ResponseModel": "priced-fixture",
+  "Generate": true,
+  "Stream": false,
+  "RequestedAt": "2026-09-30T13:56:39.385227-04:00",
+  "Latency": 562175,
+  "TTFT": 486617,
+  "Failed": false,
+  "Failure": {
+    "StatusCode": 0,
+    "Body": ""
+  },
+  "Detail": {
+    "InputTokens": 1000,
+    "OutputTokens": 100,
+    "ReasoningTokens": 20,
+    "CachedTokens": 200,
+    "CacheReadTokens": 200,
+    "CacheCreationTokens": 0,
+    "TotalTokens": 1100
+  },
+  "ResponseHeaders": {
+    "Content-Type": [
+      "application/json"
+    ],
+    "X-Codex-Primary-Used-Percent": [
+      "42"
+    ],
+    "X-Codex-Primary-Window-Minutes": [
+      "300"
+    ],
+    "X-Codex-Primary-Reset-After-Seconds": [
+      "3600"
+    ]
+  }
+}

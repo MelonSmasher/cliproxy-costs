@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "since": "2026-09-29T00:00:00.000Z",
+  "until": "2026-10-01T00:00:00.000Z",
+  "group": "day",
+  "totals": {
+    "requests": 3,
+    "failed": 0,
+    "cost_usd": 0.02124,
+    "unpriced_requests": 1,
+    "tokens": {
+      "input": 4850,
+      "cache_read": 8200,
+      "cache_write": 0,
+      "output": 1005,
+      "reasoning": 320
+    },
+    "cache_savings_usd": 0.01476
+  },
+  "groups": [
+    {
+      "key": "2026-09-29",
+      "label": null,
+      "requests": 1,
+      "failed": 0,
+      "cost_usd": null,
+      "unpriced_requests": 1,
+      "tokens": {
+        "input": 50,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 5,
+        "reasoning": 0
+      },
+      "cache_savings_usd": null,
+      "latency_ms": {
+        "p50": 2000,
+        "p95": 2000
+      },
+      "ttft_ms": null,
+      "series": [
+        {
+          "key": "mystery-1",
+          "label": null,
+          "requests": 1,
+          "cost_usd": null
+        }
+      ]
+    },
+    {
+      "key": "2026-09-30",
+      "label": null,
+      "requests": 2,
+      "failed": 0,
+      "cost_usd": 0.02124,
+      "unpriced_requests": 0,
+      "tokens": {
+        "input": 4800,
+        "cache_read": 8200,
+        "cache_write": 0,
+        "output": 1000,
+        "reasoning": 320
+      },
+      "cache_savings_usd": null,
+      "latency_ms": {
+        "p50": 0.63,
+        "p95": 386
+      },
+      "ttft_ms": {
+        "p50": 0.56,
+        "p95": 120
+      },
+      "series": [
+        {
+          "key": "gpt-6-sol",
+          "label": null,
+          "requests": 1,
+          "cost_usd": 0.0186
+        },
+        {
+          "key": "priced-fixture",
+          "label": null,
+          "requests": 1,
+          "cost_usd": 0.00264
+        }
+      ]
+    }
+  ],
+  "unpriced_models": [
+    {
+      "model": "mystery-1",
+      "provider": "openai-compatible-example",
+      "requests": 1,
+      "status": "unknown"
+    }
+  ],
+  "failures": [],
+  "health": {
+    "feed_status": "ok",
+    "feed_fetched_at": "2026-09-30T17:59:58.900Z",
+    "feed_etag": "\"1b1c51a84d7aeee1f85fc25d0e565bf5\"",
+    "feed_error": null,
+    "feed_url": "https://catalog.stencil.so/models.json.zstd",
+    "dropped_records": 0,
+    "queue_depth": 0,
+    "token_mismatch": 0,
+    "raw_retention_days": 90,
+    "write_error": null
+  },
+  "subscriptions": [],
+  "notices": []
+}

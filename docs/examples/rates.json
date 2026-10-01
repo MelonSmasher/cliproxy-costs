@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "feed": {
+    "url": "https://catalog.stencil.so/models.json.zstd",
+    "etag": "\"1b1c51a84d7aeee1f85fc25d0e565bf5\"",
+    "fetched_at": "2026-09-30T17:59:58.900Z",
+    "status": "ok",
+    "error": null
+  },
+  "models": [
+    {
+      "model": "gpt-6-sol",
+      "status": "ok",
+      "catalog": {
+        "provider": "openai",
+        "model": "gpt-6-sol"
+      },
+      "resolved_by": "learned",
+      "rate_card_id": "rc_9b8f961d832b",
+      "rates": {
+        "input": 2,
+        "output": 10,
+        "cache_read": 0.2,
+        "cache_write": 2.5
+      },
+      "tiers": [
+        {
+          "above_prompt_tokens": 272000,
+          "input": 4,
+          "output": 15,
+          "cache_read": 0.4,
+          "cache_write": 5
+        }
+      ]
+    },
+    {
+      "model": "priced-fixture",
+      "status": "override",
+      "catalog": null,
+      "resolved_by": "override",
+      "rate_card_id": "rc_541668fd08b9",
+      "rates": {
+        "input": 2,
+        "output": 10,
+        "cache_read": 0.2,
+        "cache_write": 2.5
+      },
+      "tiers": []
+    },
+    {
+      "model": "mystery-1",
+      "status": "unknown",
+      "catalog": null,
+      "resolved_by": null,
+      "rate_card_id": null,
+      "rates": null,
+      "tiers": []
+    }
+  ]
+}

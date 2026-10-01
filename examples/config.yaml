@@ -1,0 +1,67 @@
+# CLIProxyAPI config.yaml excerpt for cliproxy-costs.
+# Every key is optional; the values shown are the defaults unless noted.
+# Secrets never go in this file: the read token and the fingerprint secret are
+# read from the environment variables named below.
+plugins:
+  enabled: true
+  dir: plugins                       # the library goes in plugins/linux/<arch>/cliproxy-costs.so
+  configs:
+    cliproxy-costs:
+      enabled: true
+      priority: 10
+      db-path: ./data/cliproxy-costs/ledger.db   # relative to the CPA working directory
+      pricing:
+        feed-url: https://catalog.stencil.so/models.json.zstd
+        refresh-hours: 24
+        feed-timeout-seconds: 30
+        feed-max-bytes: 67108864     # decoded size cap
+        catalog-search-order: [anthropic, openai, google]
+        # CPA provider → catalog provider, merged over the built-in defaults
+        # (claude → anthropic, codex → openai, gemini/gemini-cli/vertex/aistudio/antigravity → google).
+        # Keys may be globs.
+        provider-map:
+          "openai-compatible-*": openai          # example, not a default
+        # Normalization family per CPA provider (default: derived from the catalog provider).
+        provider-families: {}
+        # "<client model id>": "<catalog provider>/<catalog model id>"
+        aliases:
+          my-model-alias: openai/<catalog-model-id>   # example
+        # Manual rates in USD per 1M tokens, keyed by "<catalog provider>/<model>" or "<client model id>".
+        overrides:
+          <client-model-id>:                           # example
+            input: 1.0
+            output: 4.0
+            cache_read: 0.1
+            cache_write: 1.25
+            tiers:
+              - {above-prompt-tokens: 200000, input: 2.0, output: 6.0}
+      inject:
+        body: true                   # usage.cost / usage.cost_details in response bodies
+        headers: true                # X-CliProxy-Pricing / X-CliProxy-Cost-USD
+      read-api:
+        token-env: CLIPROXY_COSTS_READ_TOKEN
+      clients:
+        fingerprint-secret-env: CLIPROXY_COSTS_HMAC_SECRET
+        labels: []                   # [{fingerprint: "<16 hex>", label: "<text>", inject: false}]
+      subscriptions: []              # [{credential: "<16-hex auth index>", label: "<text>", usd-per-month: 20}]
+      credential-labels: {}          # "<16-hex auth index>": "<text>"
+      # Display-only conversion; everything is stored and computed in USD.
+      currency:
+        display: USD                 # dashboard default; must be listed below
+        currencies: [USD, EUR, CNY]  # ISO 4217 codes; USD is always included
+        source: ecb                  # ecb | fixed | off
+        ecb-url: https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml
+        refresh-hours: 12
+        stale-after-hours: 96        # ECB publishes on working days; weekends are normal
+        fixed: {}                    # units per 1 USD, e.g. {EUR: 0.88}; fills what ECB lacks
+      quota:
+        stale-after-minutes: 30
+      retention:
+        raw-days: 90                 # daily rollups are kept forever
+      queue:
+        capacity: 10000
+        batch-size: 256
+        flush-ms: 500
+      stream-state:
+        max-entries: 4096
+        ttl-seconds: 900

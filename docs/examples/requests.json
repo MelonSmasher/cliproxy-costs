@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "traces": [
+    {
+      "trace_id": "01a0f377-da29-7269-bbc8-f6c7ce1ca506",
+      "status": "complete",
+      "cost_usd": 0.00264,
+      "attempts": [
+        {
+          "request_id": "dfe91fb3-297c-4375-96bb-62f5c9842490",
+          "requested_at": "2026-09-30T17:58:33.114Z",
+          "provider": "openai-compatible-example",
+          "model": "priced-fixture",
+          "response_model": "priced-fixture",
+          "credential": "c0ffee00c0ffee00",
+          "client": "e51be9e4742a3d0a",
+          "stream": false,
+          "failed": false,
+          "failure_status": null,
+          "latency_ms": 0.63,
+          "ttft_ms": 0.56,
+          "tokens": {
+            "input": 800,
+            "cache_read": 200,
+            "cache_write": 0,
+            "output": 100,
+            "reasoning": 20
+          },
+          "cost": {
+            "total": 0.00264,
+            "input": 0.0016,
+            "cache_read": 0.00004,
+            "cache_write": 0,
+            "output": 0.001
+          },
+          "pricing_status": "override",
+          "rate_card_id": "rc_541668fd08b9",
+          "tier": null
+        }
+      ]
+    },
+    {
+      "trace_id": "01a0f377-0000-7000-8000-000000000000",
+      "status": "pending",
+      "cost_usd": null,
+      "attempts": []
+    }
+  ]
+}

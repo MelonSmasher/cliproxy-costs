@@ -1,0 +1,29 @@
+{
+  "RequestID": "6b8c2d3e-4f5a-4b6c-9d7e-8f9a0b1c2d3e",
+  "SourceFormat": "claude",
+  "Model": "priced-fixture",
+  "RequestedModel": "priced-fixture",
+  "RequestHeaders": {
+    "Authorization": [
+      "<redacted>"
+    ]
+  },
+  "ResponseHeaders": {
+    "Content-Type": [
+      "text/event-stream"
+    ]
+  },
+  "OriginalRequest": "eyJtb2RlbCI6InByaWNlZC1maXh0dXJlIiwic3RyZWFtIjp0cnVlfQ==",
+  "RequestBody": "eyJtb2RlbCI6InByaWNlZC1maXh0dXJlIiwic3RyZWFtIjp0cnVlfQ==",
+  "Body": null,
+  "HistoryChunks": null,
+  "ChunkIndex": -1,
+  "Metadata": {
+    "caller_scope": "3c2d0f6a5b4e8d7c1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081",
+    "generate": true,
+    "request_path": "/v1/chat/completions",
+    "requested_model": "priced-fixture",
+    "service_tier": ""
+  },
+  "host_callback_id": "cb-2"
+}

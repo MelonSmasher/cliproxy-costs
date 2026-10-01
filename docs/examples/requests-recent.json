@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "attempts": [
+    {
+      "trace_id": "01a0f377-da29-7269-bbc8-f6c7ce1ca506",
+      "request_id": "dfe91fb3-297c-4375-96bb-62f5c9842490",
+      "requested_at": "2026-09-30T17:58:33.114Z",
+      "provider": "openai-compatible-example",
+      "model": "priced-fixture",
+      "response_model": "priced-fixture",
+      "credential": "c0ffee00c0ffee00",
+      "client": "e51be9e4742a3d0a",
+      "stream": false,
+      "failed": false,
+      "failure_status": null,
+      "latency_ms": 0.63,
+      "ttft_ms": 0.56,
+      "tokens": {
+        "input": 800,
+        "cache_read": 200,
+        "cache_write": 0,
+        "output": 100,
+        "reasoning": 20
+      },
+      "cost": {
+        "total": 0.00264,
+        "input": 0.0016,
+        "cache_read": 0.00004,
+        "cache_write": 0,
+        "output": 0.001
+      },
+      "pricing_status": "override",
+      "rate_card_id": "rc_541668fd08b9",
+      "tier": null
+    },
+    {
+      "trace_id": "01a0f370-1111-7222-8333-444455556666",
+      "request_id": "9b0c6f7e-2a8d-4c51-9d35-7c1f0e4a6b21",
+      "requested_at": "2026-09-30T17:56:39.000Z",
+      "provider": "codex",
+      "model": "gpt-6-sol",
+      "response_model": null,
+      "credential": "c0ffee00c0ffee00",
+      "client": null,
+      "stream": true,
+      "failed": false,
+      "failure_status": null,
+      "latency_ms": 386,
+      "ttft_ms": 120,
+      "tokens": {
+        "input": 4000,
+        "cache_read": 8000,
+        "cache_write": 0,
+        "output": 900,
+        "reasoning": 300
+      },
+      "cost": {
+        "total": 0.0186,
+        "input": 0.008,
+        "cache_read": 0.0016,
+        "cache_write": 0,
+        "output": 0.009
+      },
+      "pricing_status": "ok",
+      "rate_card_id": "rc_9b8f961d832b",
+      "tier": null
+    }
+  ],
+  "next_before": "2026-09-30T17:56:39.000Z"
+}
