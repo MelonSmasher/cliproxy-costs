@@ -502,4 +502,9 @@ func TestDashboardAssetsServedWithoutAuth(t *testing.T) {
 			t.Fatalf("%s: dashboard must be embeddable same-origin only: %v", p, r.Headers)
 		}
 	}
+	// index.html resolves its scripts and the read API relative to the page
+	// URL; under "/dashboard/" they would 404 and the page would never sign in.
+	if r := get(v, DashboardPath+"/", "", nil); r.StatusCode != 404 {
+		t.Fatalf("%s/: %d, want 404", DashboardPath, r.StatusCode)
+	}
 }

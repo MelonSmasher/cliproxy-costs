@@ -80,8 +80,12 @@ func Handle(v *View, req *abi.ManagementRequest) abi.ManagementResponse {
 		return errorResp(http.StatusBadRequest, "bad_request", "only GET is supported")
 	}
 	switch {
-	case path == DashboardPath || strings.HasPrefix(path, DashboardPath+"/"):
-		return serveAsset(strings.TrimPrefix(strings.TrimPrefix(path, DashboardPath), "/"))
+	// Only the exact path serves the page: index.html uses relative URLs
+	// (dashboard/app.js, api/v1/…), which break under a trailing slash.
+	case path == DashboardPath:
+		return serveAsset("")
+	case strings.HasPrefix(path, DashboardPath+"/") && path != DashboardPath+"/":
+		return serveAsset(strings.TrimPrefix(path, DashboardPath+"/"))
 	case strings.HasPrefix(path, ReadPrefix):
 		if v.ReadToken == nil {
 			return errorResp(http.StatusServiceUnavailable, "read_api_disabled", "read API token is not configured")
