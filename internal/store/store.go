@@ -214,7 +214,9 @@ func (s *Store) LastWriteError() string { return s.lastErr.Load().(string) }
 
 // Close stops accepting work, lets the writer drain the queue until deadline,
 // then closes both pools. Rows still queued at the deadline are counted as
-// dropped. Idempotent.
+// dropped. When the writer is still mid-batch at the deadline, Close returns
+// without waiting for it: the batch commits on its own (bounded by the
+// writeBatch timeout) and the database is closed when it finishes. Idempotent.
 func (s *Store) Close(deadline time.Duration) error {
 	s.mu.Lock()
 	if s.closed {
@@ -227,15 +229,25 @@ func (s *Store) Close(deadline time.Duration) error {
 	select {
 	case <-s.done:
 	case <-time.After(deadline):
-		// The writer is still flushing; the connection close below makes its
-		// in-flight transaction fail and the remaining items are lost.
+		// The writer holds the only write connection for its current batch;
+		// anything after it in the queue is dropped.
 		for it := range s.ch {
 			if it.Row != nil {
 				s.dropped.Add(1)
 			}
 		}
+		// The checkpoint and Close would both wait for that connection, so
+		// hand them to the writer's exit instead of blocking here.
+		go func() {
+			<-s.done
+			_ = s.w.Close()
+		}()
+		return s.r.Close()
 	}
-	_, _ = s.w.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	// The writer is idle: the checkpoint gets the connection at once.
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	_, _ = s.w.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	cancel()
 	errW := s.w.Close()
 	errR := s.r.Close()
 	return errors.Join(errW, errR)

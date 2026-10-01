@@ -109,6 +109,37 @@ func TestCloseDrainsAndRestartKeepsRows(t *testing.T) {
 	}
 }
 
+// The writer's single connection can be busy past the deadline (a slow batch);
+// Close must still return on time instead of queueing behind it.
+func TestCloseHonoursDeadlineWhileWriterIsBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "l.db")
+	s := open(t, path, Options{Capacity: 100, BatchSize: 1, Flush: time.Millisecond})
+	// Hold the only write connection, as a long writeBatch would.
+	conn, err := s.w.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cost := 1.0
+	s.Enqueue(Item{Row: row("busy", time.Now().UnixMilli(), &cost)})
+	s.Enqueue(Item{Row: row("queued", time.Now().UnixMilli(), &cost)})
+	start := time.Now()
+	_ = s.Close(100 * time.Millisecond)
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("Close blocked %v past a 100ms deadline", took)
+	}
+	// Releasing the connection lets the writer finish its batch and close the
+	// write pool in the background.
+	_ = conn.Close()
+	waitFor(t, func() bool {
+		select {
+		case <-s.done:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
 func TestRetentionKeepsRollups(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "l.db"), Options{Capacity: 100, BatchSize: 1, Flush: time.Millisecond})
 	defer s.Close(time.Second)
