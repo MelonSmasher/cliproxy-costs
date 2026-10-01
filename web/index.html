@@ -255,13 +255,8 @@
 <dialog id="auth" class="modal">
   <form id="auth-form" autocomplete="off">
     <h2>Sign in</h2>
-    <p class="muted small">The token is kept in this page's memory only. Reloading the page forgets it.</p>
+    <p class="muted small">Sign in with CLIProxyAPI's management key. It is kept in this page's memory only; reloading the page forgets it.</p>
     <p class="auth-msg" id="auth-msg" role="alert" hidden></p>
-    <fieldset class="modes">
-      <legend>Credential type</legend>
-      <label class="radio"><input type="radio" name="mode" value="admin" checked> Management key</label>
-      <label class="radio"><input type="radio" name="mode" value="read"> Read token</label>
-    </fieldset>
     <label class="field">
       <span id="auth-label">Management key</span>
       <input type="password" id="auth-token" required autocomplete="off" spellcheck="false">

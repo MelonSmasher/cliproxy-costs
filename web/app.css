@@ -344,10 +344,6 @@ table.clickable tbody tr:hover, table.clickable tbody tr:focus-visible { backgro
 .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 
-.modes { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
-.modes legend { padding: 0; margin-bottom: 4px; font-size: 0.85rem; color: var(--muted); }
-.radio { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-
 .auth-msg { margin: 0; padding: 8px 10px; border-radius: 7px; background: var(--banner-bg); color: var(--banner-text); font-size: 0.87rem; }
 
 /* ---------- responsive ---------- */

@@ -26,10 +26,9 @@ import (
 var update = flag.Bool("update", false, "rewrite docs/examples from handler output")
 
 const (
-	readToken = "read-token-for-tests-0123456789abcdef"
-	secret    = "hmac-secret-for-tests-0123456789ab"
-	credIdx   = "c0ffee00c0ffee00"
-	traceID   = "01a0f377-da29-7269-bbc8-f6c7ce1ca506"
+	secret  = "hmac-secret-for-tests-0123456789ab"
+	credIdx = "c0ffee00c0ffee00"
+	traceID = "01a0f377-da29-7269-bbc8-f6c7ce1ca506"
 )
 
 var now = time.Date(2026, 9, 30, 18, 0, 0, 0, time.UTC)
@@ -114,7 +113,7 @@ func fixtureWith(t *testing.T, extra ...*abi.UsageRecord) *View {
 	}
 	time.Sleep(20 * time.Millisecond) // last quota upsert shares the final batch
 	return &View{
-		Config: cfg, Resolver: res, Store: st, ReadToken: ReadTokenHash(readToken), Now: func() time.Time { return now },
+		Config: cfg, Resolver: res, Store: st, Now: func() time.Time { return now },
 		Feed: catalog.State{Catalog: cat, ETag: `"1b1c51a84d7aeee1f85fc25d0e565bf5"`, FetchedMS: time.Date(2026, 9, 30, 17, 59, 58, 900e6, time.UTC).UnixMilli(), Status: "ok"},
 		FX:   fx.State{Snapshot: ecbSnapshot()},
 	}
@@ -162,7 +161,6 @@ func golden(t *testing.T, name string, body []byte) {
 
 func TestGoldenExamples(t *testing.T) {
 	v := fixture(t)
-	bearer := "Bearer " + readToken
 	cases := []struct {
 		file, ep string
 		q        url.Values
@@ -177,7 +175,7 @@ func TestGoldenExamples(t *testing.T) {
 		{"fx.json", "fx", nil},
 	}
 	for _, tc := range cases {
-		r := get(v, ReadPrefix+tc.ep, bearer, tc.q)
+		r := get(v, AdminPrefix+tc.ep, "", tc.q)
 		if r.StatusCode != 200 {
 			t.Fatalf("%s: %d %s", tc.ep, r.StatusCode, r.Body)
 		}
@@ -186,73 +184,27 @@ func TestGoldenExamples(t *testing.T) {
 		}
 		golden(t, tc.file, r.Body)
 	}
-	golden(t, "error-unauthorized.json", get(v, ReadPrefix+"quota", "", nil).Body)
 }
 
-func TestReadAuth(t *testing.T) {
+// CPA's plugin-store policy: /v0/resource/plugins/ carries static files only,
+// because CPA does not authenticate it. No data endpoint may answer there,
+// not even with a token, and only management routes are registered for data.
+func TestNoDataUnderResourceRoutes(t *testing.T) {
 	v := fixture(t)
-	for name, auth := range map[string]string{
-		"missing":      "",
-		"wrong token":  "Bearer " + strings.Repeat("x", 40),
-		"wrong scheme": "Basic " + readToken,
-		"no scheme":    readToken,
-	} {
-		for _, ep := range []string{"quota", "fx"} {
-			r := get(v, ReadPrefix+ep, auth, nil)
-			if r.StatusCode != 401 || r.Headers.Get("Www-Authenticate") == "" {
-				t.Errorf("%s %s: %d %v", ep, name, r.StatusCode, r.Headers)
+	for _, ep := range []string{"summary", "quota", "requests", "rates", "fx"} {
+		for _, p := range []string{ResourceBase + "/api/v1/" + ep, ResourceBase + "/" + ep, DashboardPath + "/" + ep} {
+			if r := get(v, p, "Bearer anything-at-all-0123456789abcdef", url.Values{"recent": {"1"}}); r.StatusCode != 404 {
+				t.Errorf("%s: %d, want 404", p, r.StatusCode)
 			}
 		}
 	}
-	if r := get(v, ReadPrefix+"quota", "bEaReR "+readToken, nil); r.StatusCode != 200 {
-		t.Errorf("scheme must be case-insensitive: %d", r.StatusCode)
+	reg := Register()
+	if len(reg.Routes) != 5 {
+		t.Fatalf("management routes %+v", reg.Routes)
 	}
-	v.ReadToken = ReadTokenHash("too-short")
-	if v.ReadToken != nil {
-		t.Fatal("short token must be treated as unset")
-	}
-	r := get(v, ReadPrefix+"quota", "Bearer too-short", nil)
-	if r.StatusCode != 503 || !strings.Contains(string(r.Body), "read_api_disabled") {
-		t.Fatalf("unset token: %d %s", r.StatusCode, r.Body)
-	}
-}
-
-// stripAuthID removes admin-only auth_id keys recursively.
-func stripAuthID(x any) any {
-	switch t := x.(type) {
-	case map[string]any:
-		delete(t, "auth_id")
-		for k, v := range t {
-			t[k] = stripAuthID(v)
-		}
-	case []any:
-		for i := range t {
-			t[i] = stripAuthID(t[i])
-		}
-	}
-	return x
-}
-
-func TestAdminEqualsReadPlusAuthID(t *testing.T) {
-	v := fixture(t)
-	for _, tc := range []struct {
-		ep string
-		q  url.Values
-	}{{"quota", nil}, {"requests", url.Values{"trace_id": {traceID}}}, {"summary", url.Values{"group": {"credential"}}}, {"rates", nil}, {"fx", nil}} {
-		admin := get(v, AdminPrefix+tc.ep, "", tc.q)
-		read := get(v, ReadPrefix+tc.ep, "Bearer "+readToken, tc.q)
-		var a, r any
-		_ = json.Unmarshal(admin.Body, &a)
-		_ = json.Unmarshal(read.Body, &r)
-		if tc.ep == "quota" || tc.ep == "requests" {
-			if !strings.Contains(string(admin.Body), `"auth_id":"example-auth.json"`) || strings.Contains(string(read.Body), "auth_id") {
-				t.Fatalf("%s: auth_id must be admin-only", tc.ep)
-			}
-		}
-		aj, _ := json.Marshal(stripAuthID(a))
-		rj, _ := json.Marshal(r)
-		if !bytes.Equal(aj, rj) {
-			t.Fatalf("%s: admin minus auth_id != read\n%s\n%s", tc.ep, aj, rj)
+	for _, res := range reg.Resources {
+		if res.Path != "/dashboard" && !strings.HasPrefix(res.Path, "/dashboard/") {
+			t.Errorf("non-static resource registered: %q", res.Path)
 		}
 	}
 }
@@ -266,7 +218,7 @@ type fxBody struct {
 
 func fxGet(t *testing.T, v *View) fxBody {
 	t.Helper()
-	r := get(v, ReadPrefix+"fx", "Bearer "+readToken, nil)
+	r := get(v, AdminPrefix+"fx", "", nil)
 	if r.StatusCode != 200 {
 		t.Fatalf("%d %s", r.StatusCode, r.Body)
 	}
@@ -329,16 +281,15 @@ func TestFXSourcesAndStatus(t *testing.T) {
 
 func TestRequestsValidationAndPending(t *testing.T) {
 	v := fixture(t)
-	bearer := "Bearer " + readToken
 	ids := make([]string, 101)
 	for i := range ids {
 		ids[i] = "x" + strings.Repeat("y", i)
 	}
-	if r := get(v, ReadPrefix+"requests", bearer, url.Values{"trace_id": {strings.Join(ids, ",")}}); r.StatusCode != 400 {
+	if r := get(v, AdminPrefix+"requests", "", url.Values{"trace_id": {strings.Join(ids, ",")}}); r.StatusCode != 400 {
 		t.Fatalf("101 ids: %d", r.StatusCode)
 	}
 	// Unknown UUIDv7 older than raw retention → expired; recent → pending.
-	r := get(v, ReadPrefix+"requests", bearer, url.Values{"trace_id": {"01890000-0000-7000-8000-000000000000,01a0f377-0000-7000-8000-000000000000"}})
+	r := get(v, AdminPrefix+"requests", "", url.Values{"trace_id": {"01890000-0000-7000-8000-000000000000,01a0f377-0000-7000-8000-000000000000"}})
 	var body struct {
 		Traces []struct{ Status string } `json:"traces"`
 	}
@@ -346,17 +297,16 @@ func TestRequestsValidationAndPending(t *testing.T) {
 	if len(body.Traces) != 2 || body.Traces[0].Status != "expired" || body.Traces[1].Status != "pending" {
 		t.Fatalf("%s", r.Body)
 	}
-	if r := get(v, ReadPrefix+"summary", bearer, url.Values{"group": {"nope"}}); r.StatusCode != 400 {
+	if r := get(v, AdminPrefix+"summary", "", url.Values{"group": {"nope"}}); r.StatusCode != 400 {
 		t.Fatalf("bad group: %d", r.StatusCode)
 	}
-	if r := get(v, ReadPrefix+"nope", bearer, nil); r.StatusCode != 404 {
+	if r := get(v, AdminPrefix+"nope", "", nil); r.StatusCode != 404 {
 		t.Fatalf("unknown endpoint: %d", r.StatusCode)
 	}
 }
 
 func TestSummaryHourGroup(t *testing.T) {
 	v := fixture(t)
-	bearer := "Bearer " + readToken
 	type body struct {
 		Group  string `json:"group"`
 		Groups []struct {
@@ -366,7 +316,7 @@ func TestSummaryHourGroup(t *testing.T) {
 	}
 	fetch := func(q url.Values) body {
 		t.Helper()
-		r := get(v, ReadPrefix+"summary", bearer, q)
+		r := get(v, AdminPrefix+"summary", "", q)
 		if r.StatusCode != 200 {
 			t.Fatalf("%v: %d %s", q, r.StatusCode, r.Body)
 		}
@@ -408,7 +358,6 @@ func TestSummaryCacheSavingsAndFailures(t *testing.T) {
 		failedRecord("22222222-0000-4000-8000-000000000429", 429, time.Date(2026, 9, 30, 13, 0, 0, 0, time.UTC)),
 		failedRecord("33333333-0000-4000-8000-000000000000", 0, time.Date(2026, 9, 30, 14, 0, 0, 0, time.UTC)),
 	)
-	bearer := "Bearer " + readToken
 	type body struct {
 		Totals struct {
 			CacheSavingsUSD *float64 `json:"cache_savings_usd"`
@@ -421,7 +370,7 @@ func TestSummaryCacheSavingsAndFailures(t *testing.T) {
 	}
 	fetch := func(since string) body {
 		t.Helper()
-		r := get(v, ReadPrefix+"summary", bearer, url.Values{"since": {since}, "until": {"2026-09-30T18:00:00Z"}, "group": {"model"}})
+		r := get(v, AdminPrefix+"summary", "", url.Values{"since": {since}, "until": {"2026-09-30T18:00:00Z"}, "group": {"model"}})
 		if r.StatusCode != 200 {
 			t.Fatalf("%d %s", r.StatusCode, r.Body)
 		}
@@ -455,7 +404,6 @@ func TestSummaryCacheSavingsAndFailures(t *testing.T) {
 
 func TestRequestsTopAndFailedFilter(t *testing.T) {
 	v := fixtureWith(t, failedRecord("22222222-0000-4000-8000-000000000429", 429, time.Date(2026, 9, 30, 13, 0, 0, 0, time.UTC)))
-	bearer := "Bearer " + readToken
 	type body struct {
 		Attempts []struct {
 			RequestID string `json:"request_id"`
@@ -464,7 +412,7 @@ func TestRequestsTopAndFailedFilter(t *testing.T) {
 	}
 	fetch := func(q url.Values) (int, body, map[string]json.RawMessage) {
 		t.Helper()
-		r := get(v, ReadPrefix+"requests", bearer, q)
+		r := get(v, AdminPrefix+"requests", "", q)
 		var b body
 		var raw map[string]json.RawMessage
 		_ = json.Unmarshal(r.Body, &b)
@@ -502,7 +450,7 @@ func TestDashboardAssetsServedWithoutAuth(t *testing.T) {
 			t.Fatalf("%s: dashboard must be embeddable same-origin only: %v", p, r.Headers)
 		}
 	}
-	// index.html resolves its scripts and the read API relative to the page
+	// index.html resolves its scripts relative to the page
 	// URL; under "/dashboard/" they would 404 and the page would never sign in.
 	if r := get(v, DashboardPath+"/", "", nil); r.StatusCode != 404 {
 		t.Fatalf("%s/: %d, want 404", DashboardPath, r.StatusCode)

@@ -109,9 +109,12 @@ type Config struct {
 		Body    bool `yaml:"body"`
 		Headers bool `yaml:"headers"`
 	} `yaml:"inject"`
-	ReadAPI struct {
+	// ReadAPI is the removed read-token API's block. It is still accepted so
+	// an existing CPA config keeps loading (unknown keys are errors); it has
+	// no effect, and the plugin logs that once (see Removed).
+	ReadAPI *struct {
 		TokenEnv string `yaml:"token-env"`
-	} `yaml:"read-api"`
+	} `yaml:"read-api,omitempty"`
 	Clients struct {
 		FingerprintSecretEnv string        `yaml:"fingerprint-secret-env"`
 		Labels               []ClientLabel `yaml:"labels"`
@@ -162,7 +165,6 @@ func defaults() Config {
 	c.Pricing.CatalogSearchOrder = []string{"anthropic", "openai", "google"}
 	c.Inject.Body = true
 	c.Inject.Headers = true
-	c.ReadAPI.TokenEnv = "CLIPROXY_COSTS_READ_TOKEN"
 	c.Clients.FingerprintSecretEnv = "CLIPROXY_COSTS_HMAC_SECRET"
 	c.Quota.StaleAfterMinutes = 30
 	c.Retention.RawDays = 90
@@ -271,9 +273,6 @@ func (c *Config) validate() error {
 		sort.Slice(o.Tiers, func(i, j int) bool { return o.Tiers[i].AbovePromptTokens < o.Tiers[j].AbovePromptTokens })
 		c.Pricing.Overrides[k] = o
 	}
-	if !envName.MatchString(c.ReadAPI.TokenEnv) {
-		add("read-api.token-env must be an environment variable name")
-	}
 	if !envName.MatchString(c.Clients.FingerprintSecretEnv) {
 		add("clients.fingerprint-secret-env must be an environment variable name")
 	}
@@ -374,6 +373,16 @@ func (c *Currency) validate(add func(string, ...any)) {
 // relative to the CPA working directory).
 func (c *Config) ResolveDBPath() (string, error) {
 	return filepath.Abs(c.DBPath)
+}
+
+// Removed lists config keys that are still accepted but no longer do
+// anything, so the plugin can say so instead of failing to load.
+func (c *Config) Removed() []string {
+	var out []string
+	if c.ReadAPI != nil {
+		out = append(out, "read-api")
+	}
+	return out
 }
 
 // Secret returns the value of the env var named by name, or "".

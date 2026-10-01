@@ -13,8 +13,8 @@
   const DAY_MS = 86400000;
   const MONTH_DAYS = 30.4375;
   const MAX_SERIES = 8;
-  const ADMIN_BASE = "/v0/management/cliproxy-costs/v1/";
-  const READ_BASE = "api/v1/";
+  // Every data endpoint is a CPA management route; CPA checks the key.
+  const API_BASE = "/v0/management/cliproxy-costs/v1/";
   const TZ = (function () {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -36,7 +36,7 @@
 
   // ---------------------------------------------------------------- state
 
-  const auth = { mode: "admin", token: null };
+  const auth = { token: null };
   const state = {
     gen: 0,
     loading: false,
@@ -370,8 +370,7 @@
     for (const k of Object.keys(params || {})) {
       if (params[k] != null && params[k] !== "") qs.set(k, params[k]);
     }
-    const base = auth.mode === "admin" ? ADMIN_BASE : READ_BASE;
-    const url = base + ep + (qs.toString() ? "?" + qs : "");
+    const url = API_BASE + ep + (qs.toString() ? "?" + qs : "");
     let res;
     try {
       res = await fetch(url, {
@@ -403,22 +402,17 @@
   }
 
   function isAuthError(e) {
-    return e instanceof ApiError && (e.status === 401 || e.status === 403 || (e.status === 503 && e.code === "read_api_disabled"));
+    return e instanceof ApiError && (e.status === 401 || e.status === 403);
   }
 
   function authMessage(e) {
-    if (e.status === 503) {
-      return "Sign in with the management key: the read API is disabled because no read token is configured on the server (environment variable CLIPROXY_COSTS_READ_TOKEN by default, at least 32 bytes). Configure a read token to use the read-token option.";
-    }
     if (e.status === 403) {
       // The plugin never answers 403; CLIProxyAPI does, for management
       // routes, after repeated wrong keys from one IP (or with remote
       // management disabled). Retrying during the ban does not help.
-      return "CLIProxyAPI refused access (403). After 5 wrong management keys from one IP it blocks management access, including its own control panel, for about 30 minutes. Wait for the block to expire (or restart CLIProxyAPI), then sign in with the correct key — or use the Read token option, which is not affected.";
+      return "CLIProxyAPI refused access (403). After 5 wrong management keys from one IP it blocks management access, including its own control panel, for about 30 minutes; it also refuses when remote management is disabled. Wait for the block to expire (or restart CLIProxyAPI), then sign in with the correct key.";
     }
-    return auth.mode === "admin"
-      ? "The management key was rejected (401). Check the key and try again. (The read token only works with the Read token option.)"
-      : "The read token was rejected (401). Check the token and try again.";
+    return "The management key was rejected (401). Check the key and try again.";
   }
 
   function handleError(e) {
@@ -445,9 +439,9 @@
     $("fx-notice").hidden = true;
     $("fx-footer").hidden = true;
     destroyCharts();
-    // Everything rendered from the previous credential's responses (admin-only
-    // auth_id in quota tooltips, lookup rows, the attempt dialog) is dropped
-    // before anyone else signs in, not just hidden.
+    // Everything rendered from the previous session's responses (auth ids in
+    // quota tooltips, lookup rows, the attempt dialog) is dropped before
+    // anyone else signs in, not just hidden.
     state.lookupTraces = null;
     state.detailTrace = null;
     $("lookup-id").value = "";
@@ -464,10 +458,6 @@
     tokenInput.focus();
   }
 
-  function syncAuthLabel() {
-    const mode = document.querySelector('input[name="mode"]:checked').value;
-    $("auth-label").textContent = mode === "admin" ? "Management key" : "Read token";
-  }
 
   // Checks the credential with ONE request before the parallel refresh: CPA
   // bans an IP after 5 failed management-key attempts, so a typo must not
@@ -478,7 +468,6 @@
     if (!token) return;
     const submit = $("auth").querySelector('button[type="submit"]');
     if (submit) submit.disabled = true;
-    auth.mode = document.querySelector('input[name="mode"]:checked').value;
     auth.token = token;
     const gen = ++state.gen;
     try {
@@ -2279,7 +2268,6 @@
   function init() {
     $("auth-form").addEventListener("submit", onAuthSubmit);
     $("auth").addEventListener("cancel", (ev) => ev.preventDefault());
-    for (const r of document.querySelectorAll('input[name="mode"]')) r.addEventListener("change", syncAuthLabel);
     $("refresh").addEventListener("click", () => refresh(true));
     $("currency").addEventListener("change", onCurrencyChange);
     $("signout").addEventListener("click", signOut);
@@ -2346,7 +2334,6 @@
     if (mq.addEventListener) mq.addEventListener("change", onScheme);
     else if (mq.addListener) mq.addListener(onScheme);
 
-    syncAuthLabel();
     promptAuth(null);
   }
 

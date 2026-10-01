@@ -1,7 +1,8 @@
 # CLIProxyAPI config.yaml excerpt for cliproxy-costs.
 # Every key is optional; the values shown are the defaults unless noted.
-# Secrets never go in this file: the read token and the fingerprint secret are
-# read from the environment variables named below.
+# Secrets never go in this file: the fingerprint secret is read from the
+# environment variable named below. Data endpoints are CPA management routes
+# (CPA's management key), so the plugin itself needs no API token.
 plugins:
   enabled: true
   dir: plugins                       # the library goes in plugins/linux/<arch>/cliproxy-costs.so
@@ -38,8 +39,6 @@ plugins:
       inject:
         body: true                   # usage.cost / usage.cost_details in response bodies
         headers: true                # X-CliProxy-Pricing / X-CliProxy-Cost-USD
-      read-api:
-        token-env: CLIPROXY_COSTS_READ_TOKEN
       clients:
         fingerprint-secret-env: CLIPROXY_COSTS_HMAC_SECRET
         labels: []                   # [{fingerprint: "<16 hex>", label: "<text>", inject: false}]

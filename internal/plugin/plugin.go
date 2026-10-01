@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"reflect"
 	"runtime/debug"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,15 +39,14 @@ const drainDeadline = 5 * time.Second
 // state is replaced wholesale on reconfigure and feed swaps; handlers load
 // it once per call.
 type state struct {
-	cfg       *config.Config
-	resolver  *pricing.Resolver
-	feed      catalog.State
-	fx        fx.State
-	env       *intercept.Env
-	secret    []byte
-	readToken *[sha256.Size]byte
-	notices   []string
-	store     *store.Store
+	cfg      *config.Config
+	resolver *pricing.Resolver
+	feed     catalog.State
+	fx       fx.State
+	env      *intercept.Env
+	secret   []byte
+	notices  []string
+	store    *store.Store
 }
 
 // Plugin is the process-wide plugin instance.
@@ -170,9 +171,8 @@ func (p *Plugin) apply(cfg *config.Config) error {
 		return fmt.Errorf("plugin is shut down")
 	}
 	secret := []byte(config.Secret(cfg.Clients.FingerprintSecretEnv))
-	readToken := api.ReadTokenHash(config.Secret(cfg.ReadAPI.TokenEnv))
 	prev := p.cur.Load()
-	if prev != nil && reflect.DeepEqual(prev.cfg, cfg) && hmac.Equal(prev.secret, secret) && reflect.DeepEqual(prev.readToken, readToken) {
+	if prev != nil && reflect.DeepEqual(prev.cfg, cfg) && hmac.Equal(prev.secret, secret) {
 		return nil
 	}
 	if !cfg.Enabled {
@@ -216,16 +216,20 @@ func (p *Plugin) apply(cfg *config.Config) error {
 	}
 	// Publish before the workers start so the feed callback always finds a
 	// state to rebuild against.
-	p.install(cfg, secret, readToken, p.running.feed.State(), p.running.fx.State(), p.running.store)
+	p.install(cfg, secret, p.running.feed.State(), p.running.fx.State(), p.running.store)
 	if fresh {
 		p.running.start(p)
 	}
-	p.log("info", "cliproxy-costs configured", map[string]any{"db_path": dbPath, "feed_url": cfg.Pricing.FeedURL, "fingerprints": len(secret) > 0, "read_api": readToken != nil})
+	p.log("info", "cliproxy-costs configured", map[string]any{"db_path": dbPath, "feed_url": cfg.Pricing.FeedURL, "fingerprints": len(secret) > 0})
+	if removed := cfg.Removed(); len(removed) > 0 {
+		p.log("warn", "config keys no longer have any effect; remove them", map[string]any{"keys": strings.Join(removed, ","),
+			"why": "the read-token API was removed; data endpoints are CPA management routes"})
+	}
 	return nil
 }
 
 // install builds and publishes a new state from config + feed.
-func (p *Plugin) install(cfg *config.Config, secret []byte, readToken *[sha256.Size]byte, feed catalog.State, fxs fx.State, st *store.Store) {
+func (p *Plugin) install(cfg *config.Config, secret []byte, feed catalog.State, fxs fx.State, st *store.Store) {
 	res := pricing.NewResolver(cfg, feed.Catalog, &p.learned)
 	noInject := map[string]bool{}
 	for _, l := range cfg.Clients.Labels {
@@ -241,7 +245,7 @@ func (p *Plugin) install(cfg *config.Config, secret []byte, readToken *[sha256.S
 		notices = append(notices, p.secretNotice)
 	}
 	p.cur.Store(&state{
-		cfg: cfg, resolver: res, feed: feed, fx: fxs, secret: secret, readToken: readToken, notices: notices, store: st,
+		cfg: cfg, resolver: res, feed: feed, fx: fxs, secret: secret, notices: notices, store: st,
 		env: &intercept.Env{Resolver: res, InjectBody: cfg.Inject.Body, InjectHeaders: cfg.Inject.Headers, Secret: secret, NoInject: noInject},
 	})
 }
@@ -415,6 +419,21 @@ func (p *Plugin) log(level, msg string, fields map[string]any) {
 	if p.host == nil {
 		return
 	}
+	// CPA's host logger prints only the message and drops Fields, so the
+	// fields are also rendered into it (sorted key=value).
+	if len(fields) > 0 {
+		keys := make([]string, 0, len(fields))
+		for k := range fields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var b strings.Builder
+		b.WriteString(msg)
+		for _, k := range keys {
+			fmt.Fprintf(&b, " %s=%v", k, fields[k])
+		}
+		msg = b.String()
+	}
 	// Best effort; host.log must never block request paths, so it runs async.
 	go func() {
 		_ = abi.CallResult(p.host, abi.MethodHostLog, abi.HostLogRequest{Level: level, Message: msg, Fields: fields}, nil)
@@ -468,7 +487,7 @@ func (p *Plugin) management(raw []byte) []byte {
 	s := p.cur.Load()
 	v := &api.View{Now: p.now}
 	if s != nil {
-		v.Config, v.Resolver, v.Feed, v.FX, v.ReadToken, v.Notices, v.Store = s.cfg, s.resolver, s.feed, s.fx, s.readToken, s.notices, s.store
+		v.Config, v.Resolver, v.Feed, v.FX, v.Notices, v.Store = s.cfg, s.resolver, s.feed, s.fx, s.notices, s.store
 	} else {
 		v.Config, _ = config.Parse(nil)
 	}

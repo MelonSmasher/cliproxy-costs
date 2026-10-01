@@ -16,7 +16,7 @@ subscription quota, returns cost to clients and serves a dashboard.
   `X-CliProxy-Pricing` / `X-CliProxy-Cost-USD` headers.
 - **API** for tools such as
   [omp-cliproxy-usage](https://github.com/MelonSmasher/omp-cliproxy-usage),
-  usable with a read-only token.
+  under CPA's management API (management key).
 - **Dashboard**: today / week / month spend with month projection, cache
   savings, subscription value and failure rate at a glance; quota limits with
   burn rate and projected exhaustion; spend over time; per-credential,
@@ -60,11 +60,11 @@ Non-goals: billing or blocking requests; pricing image/audio/search tariffs
          db-path: ./data/cliproxy-costs/ledger.db
    ```
 
-4. Set the secrets in CPA's environment (optional but recommended):
+4. Set the client-fingerprint secret in CPA's environment (optional but
+   recommended; without it clients are not told apart):
 
    ```sh
-   export CLIPROXY_COSTS_READ_TOKEN="$(openssl rand -hex 32)"   # read API / dashboard
-   export CLIPROXY_COSTS_HMAC_SECRET="$(openssl rand -hex 32)"  # client fingerprints
+   export CLIPROXY_COSTS_HMAC_SECRET="$(openssl rand -hex 32)"
    ```
 
 5. Restart CPA. The log shows `plugin registered plugin_id=cliproxy-costs`.
@@ -75,22 +75,19 @@ All options: [`docs/config.md`](docs/config.md).
 
 `http(s)://<cpa-host>:<port>/v0/resource/plugins/cliproxy-costs/dashboard`
 
-The page itself contains no data. It asks for the CPA management key (admin
-routes, subject to CPA's `allow-remote`; the default, as used from CPA's
-management panel) or the read token (read routes), keeps it in memory only
-and fetches aggregates from the API. The currency selector in the header
-switches every amount to the chosen currency (hover a value for USD); the
-footer shows the ECB reference date and any stale or error state. Only that
-choice is remembered, in `sessionStorage` for the tab.
+The page itself contains no data. It asks for CPA's management key (the same
+one CPA's management panel uses; subject to CPA's
+`management.allow-remote`, `remote-management.allow-remote` in pre-v8
+configs), keeps it in this page's memory only, and
+fetches aggregates from the management API. The currency selector in the
+header switches every amount to the chosen currency (hover a value for USD);
+the footer shows the ECB reference date and any stale or error state. Only
+that choice is remembered, in `sessionStorage` for the tab.
 
 ## API
 
-Two route families return the same JSON:
-
-- `GET /v0/management/cliproxy-costs/v1/{summary,quota,requests,rates,fx}` —
-  CPA management key.
-- `GET /v0/resource/plugins/cliproxy-costs/api/v1/{summary,quota,requests,rates,fx}` —
-  `Authorization: Bearer <read token>`.
+`GET /v0/management/cliproxy-costs/v1/{summary,quota,requests,rates,fx}`,
+authenticated by CPA with the management key.
 
 `fx` returns display-only exchange rates (units per 1 USD); every other
 endpoint stays USD.
@@ -98,8 +95,8 @@ endpoint stays USD.
 Look up the cost of a response with its `X-Cpa-Trace-Id` header:
 
 ```sh
-curl -s -H "Authorization: Bearer $CLIPROXY_COSTS_READ_TOKEN" \
-  "http://localhost:8317/v0/resource/plugins/cliproxy-costs/api/v1/requests?trace_id=<X-Cpa-Trace-Id value>"
+curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
+  "http://localhost:8317/v0/management/cliproxy-costs/v1/requests?trace_id=<X-Cpa-Trace-Id value>"
 ```
 
 Full reference with examples: [`docs/api.md`](docs/api.md).
@@ -107,17 +104,15 @@ Full reference with examples: [`docs/api.md`](docs/api.md).
 ## Security model
 
 - The plugin is trusted native code inside the CPA process.
-- CPA does not authenticate `/v0/resource/...` routes. The plugin serves only
-  static assets there without authentication; data resources require the read
-  token (constant-time comparison). Without a configured token the read API is
-  disabled.
+- CPA does not authenticate `/v0/resource/...` routes, so the plugin serves only
+  static dashboard assets there. Every data endpoint is a management route,
+  which CPA authenticates with the management key before the plugin sees it.
 - Raw client API keys, upstream keys (`Source`), failure bodies and response
   headers are never stored or logged. Clients are identified by
   `HMAC-SHA256(secret, caller_scope)`, the same value CPA derives for its
   interceptors. Only allowlisted quota headers are parsed.
-- Admin responses add CPA's raw auth id (which may contain file names or
-  e-mail addresses); read responses identify credentials only by the opaque
-  auth index.
+- Responses include CPA's raw auth id (which may contain file names or e-mail
+  addresses) next to the opaque auth index.
 
 ## Limitations
 
@@ -161,7 +156,7 @@ the CPA image, build inside `golang:1.26-bookworm` as CI does.
 | `internal/catalog` | feed fetch, decode, snapshot |
 | `internal/fx` | ECB reference rates fetch, parse, snapshot, USD-based rates |
 | `internal/store` | SQLite schema, writer, queries, retention |
-| `internal/api` | routes, auth, endpoints, static assets |
+| `internal/api` | routes, endpoints, static assets |
 | `internal/plugin` | lifecycle and dispatch |
 | `web/` | dashboard (vanilla JS + vendored [uPlot](https://github.com/leeoniya/uPlot), MIT) |
 

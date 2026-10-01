@@ -44,7 +44,7 @@ func TestDecodeInterceptRequests(t *testing.T) {
 	}
 	var m ManagementRequest
 	load(t, "management.handle.json", &m)
-	if m.Path != "/v0/resource/plugins/cliproxy-costs/api/v1/requests" || m.Query.Get("trace_id") == "" || m.Headers.Get("Authorization") == "" {
+	if m.Path != "/v0/management/cliproxy-costs/v1/requests" || m.Query.Get("trace_id") == "" || m.Headers.Get("Authorization") == "" {
 		t.Fatalf("%+v", m)
 	}
 	var l LifecycleRequest

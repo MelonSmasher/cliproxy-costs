@@ -1,13 +1,11 @@
-// Package api serves the plugin's management and resource routes: the admin
-// data family (CPA management auth), the read-token data family and the
-// static dashboard assets.
+// Package api serves the plugin's management and resource routes: the data
+// endpoints under CPA's management API (CPA enforces the management key) and
+// the static dashboard assets under /v0/resource/plugins/, which carry no data.
 package api
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -25,38 +23,27 @@ import (
 // PluginID is the plugin id (library basename) used in resource paths.
 const PluginID = "cliproxy-costs"
 
-// Route prefixes.
+// Route prefixes. CPA's plugin-store policy reserves /v0/resource/plugins/ for
+// static files; every data endpoint is a management route.
 const (
-	AdminPrefix    = "/v0/management/" + PluginID + "/v1/"
-	ResourceBase   = "/v0/resource/plugins/" + PluginID
-	ReadPrefix     = ResourceBase + "/api/v1/"
-	DashboardPath  = ResourceBase + "/dashboard"
-	schemaVersion  = 1
-	queryTimeout   = 2 * time.Second
-	minTokenLength = 32
+	AdminPrefix   = "/v0/management/" + PluginID + "/v1/"
+	ResourceBase  = "/v0/resource/plugins/" + PluginID
+	DashboardPath = ResourceBase + "/dashboard"
+	schemaVersion = 1
+	queryTimeout  = 2 * time.Second
 )
 
 var endpoints = []string{"summary", "quota", "requests", "rates", "fx"}
 
 // View is the immutable per-call state the handlers read.
 type View struct {
-	Config    *config.Config
-	Resolver  *pricing.Resolver
-	Feed      catalog.State
-	FX        fx.State
-	ReadToken *[sha256.Size]byte // nil = read API disabled
-	Store     *store.Store       // nil while not running
-	Notices   []string
-	Now       func() time.Time
-}
-
-// ReadTokenHash hashes a configured read token, or returns nil when it is
-// shorter than the required minimum (treated as unset).
-func ReadTokenHash(token string) *[sha256.Size]byte {
-	if len(token) < minTokenLength {
-		return nil
-	}
-	return new(sha256.Sum256([]byte(token)))
+	Config   *config.Config
+	Resolver *pricing.Resolver
+	Feed     catalog.State
+	FX       fx.State
+	Store    *store.Store // nil while not running
+	Notices  []string
+	Now      func() time.Time
 }
 
 // Register returns the management.register result.
@@ -64,7 +51,6 @@ func Register() abi.ManagementRegistration {
 	var reg abi.ManagementRegistration
 	for _, ep := range endpoints {
 		reg.Routes = append(reg.Routes, abi.ManagementRoute{Method: http.MethodGet, Path: "/" + PluginID + "/v1/" + ep})
-		reg.Resources = append(reg.Resources, abi.ResourceRoute{Path: "/api/v1/" + ep, Description: "cliproxy-costs " + ep + " (read token)"})
 	}
 	reg.Resources = append(reg.Resources, abi.ResourceRoute{Path: "/dashboard", Menu: "Costs", Description: "Usage and cost dashboard"})
 	for _, a := range assetPaths {
@@ -86,36 +72,11 @@ func Handle(v *View, req *abi.ManagementRequest) abi.ManagementResponse {
 		return serveAsset("")
 	case strings.HasPrefix(path, DashboardPath+"/") && path != DashboardPath+"/":
 		return serveAsset(strings.TrimPrefix(path, DashboardPath+"/"))
-	case strings.HasPrefix(path, ReadPrefix):
-		if v.ReadToken == nil {
-			return errorResp(http.StatusServiceUnavailable, "read_api_disabled", "read API token is not configured")
-		}
-		if !checkBearer(req.Headers, v.ReadToken) {
-			r := errorResp(http.StatusUnauthorized, "unauthorized", "missing or invalid read token")
-			r.Headers.Set("WWW-Authenticate", `Bearer realm="cliproxy-costs"`)
-			return r
-		}
-		return data(v, strings.TrimPrefix(path, ReadPrefix), req, false)
 	case strings.HasPrefix(path, AdminPrefix):
-		return data(v, strings.TrimPrefix(path, AdminPrefix), req, true)
+		// CPA has already checked the management key for this route family.
+		return data(v, strings.TrimPrefix(path, AdminPrefix), req)
 	}
 	return errorResp(http.StatusNotFound, "not_found", "no such route")
-}
-
-func checkBearer(h http.Header, want *[sha256.Size]byte) bool {
-	var value string
-	for k, vs := range h {
-		if strings.EqualFold(k, "Authorization") && len(vs) > 0 {
-			value = vs[0]
-			break
-		}
-	}
-	scheme, token, ok := strings.Cut(strings.TrimSpace(value), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return false
-	}
-	got := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
 
 type apiError struct {
@@ -128,7 +89,7 @@ func (e *apiError) Error() string { return e.message }
 
 func badRequest(msg string) error { return &apiError{http.StatusBadRequest, "bad_request", msg} }
 
-func data(v *View, ep string, req *abi.ManagementRequest, admin bool) abi.ManagementResponse {
+func data(v *View, ep string, req *abi.ManagementRequest) abi.ManagementResponse {
 	if v.Store == nil {
 		return errorResp(http.StatusServiceUnavailable, "internal", "plugin storage is not running")
 	}
@@ -141,11 +102,11 @@ func data(v *View, ep string, req *abi.ManagementRequest, admin bool) abi.Manage
 	q := req.Query
 	switch ep {
 	case "summary":
-		out, err = summary(ctx, v, q, admin)
+		out, err = summary(ctx, v, q)
 	case "quota":
-		out, err = quotaResp(ctx, v, admin)
+		out, err = quotaResp(ctx, v)
 	case "requests":
-		out, err = requests(ctx, v, q, admin)
+		out, err = requests(ctx, v, q)
 	case "rates":
 		out, err = rates(ctx, v, q)
 	case "fx":

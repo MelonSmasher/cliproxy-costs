@@ -46,7 +46,7 @@ func (v *View) CredentialLabel(credential, provider string) string {
 	return provider + " " + short
 }
 
-func quotaResp(ctx context.Context, v *View, admin bool) (any, error) {
+func quotaResp(ctx context.Context, v *View) (any, error) {
 	obs, err := v.Store.Quotas(ctx)
 	if err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func quotaResp(ctx context.Context, v *View, admin bool) (any, error) {
 			Windows:    make([]quotaWindow, 0, len(s.Windows)),
 			Credits:    s.Credits,
 		}
-		if admin && o.AuthID != "" {
+		if o.AuthID != "" {
 			c.AuthID = new(o.AuthID)
 		}
 		for _, w := range s.Windows {
