@@ -138,6 +138,12 @@ func TestCloseHonoursDeadlineWhileWriterIsBusy(t *testing.T) {
 			return false
 		}
 	})
+	// The background goroutine must then close the write pool, or every
+	// shutdown that times out leaks it. Only this exact error proves it.
+	waitFor(t, func() bool {
+		err := s.w.PingContext(context.Background())
+		return err != nil && err.Error() == "sql: database is closed"
+	})
 }
 
 // The deadline covers the whole shutdown: a writer that finishes just before
