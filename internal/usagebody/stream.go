@@ -106,7 +106,13 @@ func streamDoc(format string, doc []byte, event string, start *MessagesUsage, pr
 			if !delta.present || delta.invalid {
 				return StreamResult{}
 			}
-			b, ok = delta.Merge(s).Buckets()
+			merged := delta.Merge(s)
+			// A missing or dropped message_start must not make an absent
+			// input counter look like an explicitly reported zero.
+			if merged.fields&1 == 0 {
+				return StreamResult{}
+			}
+			b, ok = merged.Buckets()
 		default:
 			return StreamResult{}
 		}

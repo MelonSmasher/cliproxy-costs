@@ -114,12 +114,12 @@ func (f *timeoutFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	reportTime(f.started)
 	if f.partial {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"openai":{"models":`)
 		w.(http.Flusher).Flush()
 	}
+	reportTime(f.started)
 	select {
 	case <-r.Context().Done():
 		reportTime(f.canceled)

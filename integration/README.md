@@ -62,6 +62,8 @@ detector covers its own process, not the separately built plugin or host.
 - Exact cost/body/header agreement, SSE terminal events, and preserved content
 - Trace correlation, HMAC fingerprints, normalized token buckets, unknown prices
   remaining null, and aggregate totals matching the ledger
+- Shutdown during a stalled feed, before headers and during a partial body:
+  actual upstream cancellation and graceful process exit well before the feed timeout
 - Graceful shutdown/restart preserving ledger rows and pricing snapshots; prices
   continue working when the fixture catalog is unavailable after restart
 
