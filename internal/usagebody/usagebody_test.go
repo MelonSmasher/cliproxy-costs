@@ -186,3 +186,77 @@ func BenchmarkStreamNonUsageFrame(b *testing.B) {
 		Stream(FormatResponses, chunk, nil, price)
 	}
 }
+
+func TestMalformedUsageIsNeverPriced(t *testing.T) {
+	for _, value := range []string{`"100"`, `-1`, `1.5`, `null`, `true`, `{}`, `9223372036854775808`} {
+		for _, tc := range []struct{ format, counter string }{{FormatChat, "prompt_tokens"}, {FormatResponses, "input_tokens"}, {FormatMessages, "input_tokens"}} {
+			body := []byte(`{"usage":{"` + tc.counter + `":` + value + `}}`)
+			if _, _, ok := NonStream(tc.format, body); ok {
+				t.Errorf("%s accepted %s", tc.format, body)
+			}
+		}
+	}
+	for _, body := range []string{
+		`{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":11}}}`,
+		`{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":9,"cache_write_tokens":2}}}`,
+		`{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":"5"}}}`,
+		`{"usage":{"prompt_tokens":10,"prompt_tokens_details":[]}}`,
+		`{"usage":{"completion_tokens":2,"completion_tokens_details":{"reasoning_tokens":3}}}`,
+		`{"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}`,
+	} {
+		if _, _, ok := NonStream(FormatChat, []byte(body)); ok {
+			t.Errorf("accepted %s", body)
+		}
+	}
+}
+
+func TestMessagesExplicitZeroReplacesStartCounter(t *testing.T) {
+	start := ReadMessagesUsage(gjson.Parse(`{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":1}`))
+	delta := ReadMessagesUsage(gjson.Parse(`{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}`))
+	if b, ok := delta.Merge(start).Buckets(); !ok || b != (pricing.Buckets{}) {
+		t.Fatalf("explicit zeros lost: %+v, %v", b, ok)
+	}
+	bad := ReadMessagesUsage(gjson.Parse(`{"output_tokens":"10"}`))
+	if _, ok := bad.Merge(start).Buckets(); ok {
+		t.Fatal("malformed delta inherited a fabricated valid price")
+	}
+}
+
+func TestTerminalWithoutUsageReleasesStream(t *testing.T) {
+	for _, chunk := range []string{"data: [DONE]\n\n", `{"type":"message_stop"}`, `{"type":"response.failed"}`, `{"type":"error"}`} {
+		res := Stream(FormatMessages, []byte(chunk), nil, price)
+		if !res.Done || res.Body != nil {
+			t.Fatalf("terminal frame %+v", res)
+		}
+	}
+}
+
+func FuzzUsageParsing(f *testing.F) {
+	for _, body := range []string{chatUsageChunk, `{"usage":{"input_tokens":10,"output_tokens":1}}`, `{"usage":{"input_tokens":0,"cache_read_input_tokens":5}}`, `{"usage":{"prompt_tokens":-1}}`, `{"usage":{"prompt_tokens":9223372036854775808}}`} {
+		f.Add([]byte(body))
+	}
+	f.Fuzz(func(t *testing.T, body []byte) {
+		for _, format := range []string{FormatChat, FormatResponses, FormatMessages} {
+			path, b, ok := NonStream(format, body)
+			if !ok {
+				continue
+			}
+			if !pricing.ValidBuckets(b) {
+				t.Fatalf("invalid buckets accepted: %+v", b)
+			}
+			a, _ := price(b)
+			out, annotated := Annotate(body, path, a)
+			if annotated && !gjson.ValidBytes(out) {
+				t.Fatalf("annotation corrupted JSON: %q", out)
+			}
+		}
+	})
+}
+
+func TestEmptyMessagesDeltaDoesNotPriceProvisionalUsage(t *testing.T) {
+	start := ReadMessagesUsage(gjson.Parse(`{"input_tokens":10,"output_tokens":0}`))
+	res := Stream(FormatMessages, []byte(`{"type":"message_delta","usage":{}}`), &start, price)
+	if res.Done || res.Body != nil {
+		t.Fatalf("provisional usage priced as final: %+v", res)
+	}
+}

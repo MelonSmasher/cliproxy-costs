@@ -106,3 +106,45 @@ func TestInvalidConfigAndUnknownMethod(t *testing.T) {
 		t.Fatalf("%s", out)
 	}
 }
+
+func TestReconfigureDoesNotReuseAnotherDatabaseModels(t *testing.T) {
+	p := New(offlineHost{}, "1")
+	defer p.Shutdown()
+	cfg := func(name string) string {
+		return "db-path: " + filepath.Join(t.TempDir(), name) + "\ncurrency: {source: off}\npricing: {feed-url: 'http://127.0.0.1:9/offline'}\n"
+	}
+	ok(t, p.Handle(abi.MethodRegister, lifecycle(cfg("one.db"))))
+	first := p.cur.Load()
+	firstStates := p.states.Load()
+	p.secretNotice = "client_fingerprints_changed"
+	first.learned.Set("private-model", "openai")
+	ok(t, p.Handle(abi.MethodReconfigure, lifecycle(cfg("two.db"))))
+	second := p.cur.Load()
+	if p.states.Load() == firstStates || p.secretNotice != "" {
+		t.Fatal("database switch reused stream state or fingerprint notice")
+	}
+	if first.learned == second.learned {
+		t.Fatal("database switch reused learned model state")
+	}
+	if _, ok := second.learned.Get("private-model"); ok {
+		t.Fatal("model escaped old database")
+	}
+	// A handler holding the old snapshot must retain its original map.
+	if got, ok := first.learned.Get("private-model"); !ok || got != "openai" {
+		t.Fatal("old snapshot was mutated")
+	}
+}
+
+func TestRejectUnsupportedSchemaBeforeOpeningStorage(t *testing.T) {
+	p := New(offlineHost{}, "1")
+	for _, schema := range []int{0, 1, 5, 7} {
+		raw, _ := json.Marshal(abi.LifecycleRequest{SchemaVersion: schema})
+		var env abi.Envelope
+		if err := json.Unmarshal(p.Handle(abi.MethodRegister, raw), &env); err != nil || env.OK || env.Error.Code != "unsupported_schema" {
+			t.Fatalf("schema %d accepted: %+v", schema, env)
+		}
+	}
+	if p.running != nil {
+		t.Fatal("unsupported schema started storage")
+	}
+}

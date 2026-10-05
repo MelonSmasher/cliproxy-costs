@@ -34,6 +34,9 @@ type feedInfo struct {
 
 func (v *View) feedInfo() feedInfo {
 	f := feedInfo{URL: v.Config.Pricing.FeedURL, FetchedAt: tsPtr(v.Feed.FetchedMS), Status: v.feedStatus()}
+	if v.Feed.Catalog != nil && v.Feed.SourceURL != "" {
+		f.URL = v.Feed.SourceURL
+	}
 	if v.Feed.ETag != "" {
 		f.ETag = new(v.Feed.ETag)
 	}
@@ -50,6 +53,8 @@ func (v *View) feedStatus() string {
 		return "error"
 	case v.Feed.Catalog == nil:
 		return "none"
+	case v.Feed.SourceURL != "" && v.Feed.SourceURL != v.Config.Pricing.FeedURL:
+		return "stale"
 	case v.Now().UnixMilli()-v.Feed.FetchedMS > int64(2*v.Config.Pricing.RefreshHours*3600*1000):
 		return "stale"
 	}

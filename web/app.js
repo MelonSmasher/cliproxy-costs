@@ -1671,7 +1671,7 @@
       setKpi(
         "kpi-value",
         v.ratio == null ? null : nf1.format(v.ratio) + "×",
-        fmtMoney(v.spend) + " API-equivalent vs " + fmtMoney(v.price) + " paid",
+        fmtMoney(v.spend) + " API-equivalent vs " + fmtMoney(v.price) + " configured",
         null,
         v.anyUnknown ? "Some subscription spend is unpriced" : null
       );

@@ -121,8 +121,8 @@ func Parse(h map[string]string, observed time.Time) (Snapshot, string, bool) {
 		return Snapshot{}, "", false
 	}
 	if v, ok := h["retry-after"]; ok {
-		if sec, err := strconv.ParseFloat(v, 64); err == nil && sec >= 0 {
-			s.RetryAfterMS = int64(sec * 1000)
+		if ms, ok := secondsMS(v); ok {
+			s.RetryAfterMS = ms
 		} else if t, err := http.ParseTime(v); err == nil {
 			s.RetryAfterMS = max(0, t.Sub(observed).Milliseconds())
 		}
@@ -142,14 +142,14 @@ func parseCodex(h map[string]string, observed time.Time, s *Snapshot) bool {
 	add := func(prefix, ns string, reached bool) {
 		used, err1 := strconv.ParseFloat(h[prefix+"used-percent"], 64)
 		minutes, err2 := strconv.ParseInt(h[prefix+"window-minutes"], 10, 64)
-		if err1 != nil || err2 != nil || used < 0 || used > 100 || math.IsNaN(used) || minutes <= 0 {
+		if err1 != nil || err2 != nil || used < 0 || used > 100 || math.IsNaN(used) || minutes <= 0 || minutes > math.MaxInt64/60000 {
 			return
 		}
 		var reset int64
-		if at, err := strconv.ParseInt(h[prefix+"reset-at"], 10, 64); err == nil && at > 0 {
+		if at, err := strconv.ParseInt(h[prefix+"reset-at"], 10, 64); err == nil && at > 0 && at <= math.MaxInt64/1000 {
 			reset = at * 1000
-		} else if after, err := strconv.ParseFloat(h[prefix+"reset-after-seconds"], 64); err == nil && after >= 0 {
-			reset = observed.UnixMilli() + int64(after*1000)
+		} else if after, ok := secondsMS(h[prefix+"reset-after-seconds"]); ok && observed.UnixMilli() >= 0 && after <= math.MaxInt64-observed.UnixMilli() {
+			reset = observed.UnixMilli() + after
 		} else {
 			return
 		}
@@ -225,14 +225,20 @@ func claudeMinutes(w string) (int64, bool) {
 	if err != nil || n <= 0 {
 		return 0, false
 	}
+	multiplier := int64(1)
 	switch w[len(w)-1] {
 	case 'm':
-		return n, true
 	case 'h':
-		return n * 60, true
+		multiplier = 60
 	case 'd':
-		return n * 1440, true
+		multiplier = 1440
+	default:
+		return 0, false
 	}
+	if n <= math.MaxInt64/60000/multiplier {
+		return n * multiplier, true
+	}
+
 	return 0, false
 }
 
@@ -285,6 +291,10 @@ func parseClaude(h map[string]string, _ time.Time, s *Snapshot) bool {
 			continue
 		}
 		pct := math.Round(f*1000) / 10
+		fraction := math.Round(f*1e6) / 1e6
+		if math.IsInf(pct, 0) || math.IsInf(fraction, 0) {
+			continue
+		}
 		st := statusFor(pct)
 		switch strings.ToLower(h[p+w+"-status"]) {
 		case "rejected":
@@ -295,7 +305,7 @@ func parseClaude(h map[string]string, _ time.Time, s *Snapshot) bool {
 			}
 		}
 		var reset int64
-		if at, err := strconv.ParseInt(h[p+w+"-reset"], 10, 64); err == nil && at > 0 {
+		if at, err := strconv.ParseInt(h[p+w+"-reset"], 10, 64); err == nil && at > 0 && at <= math.MaxInt64/1000 {
 			reset = at * 1000
 		}
 		label := WindowLabel(minutes)
@@ -309,11 +319,22 @@ func parseClaude(h map[string]string, _ time.Time, s *Snapshot) bool {
 			Label:        label,
 			DurationMS:   minutes * 60000,
 			UsedPercent:  pct,
-			UsedFraction: math.Round(f*1e6) / 1e6,
+			UsedFraction: fraction,
 			ResetsAtMS:   reset,
 			Status:       st,
 		})
 		found = true
 	}
 	return found
+}
+
+// secondsMS rejects non-finite values and float-to-int overflow before
+// converting upstream duration headers into persisted milliseconds.
+func secondsMS(raw string) (int64, bool) {
+	seconds, err := strconv.ParseFloat(raw, 64)
+	ms := seconds * 1000
+	if err != nil || seconds < 0 || math.IsNaN(ms) || math.IsInf(ms, 0) || ms >= float64(math.MaxInt64) {
+		return 0, false
+	}
+	return int64(ms), true
 }

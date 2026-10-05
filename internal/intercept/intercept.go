@@ -4,6 +4,7 @@
 package intercept
 
 import (
+	"math"
 	"net/http"
 	"strconv"
 
@@ -37,7 +38,8 @@ func (e *Env) clientAllowed(meta map[string]any) bool {
 	}
 	scope, _ := meta["caller_scope"].(string)
 	fp := ledger.Fingerprint(e.Secret, scope)
-	return fp == "" || !e.NoInject[fp]
+	// If identity is unavailable we cannot prove this is not an opted-out client.
+	return fp != "" && !e.NoInject[fp]
 }
 
 func (e *Env) resolve(model, requested string) pricing.Resolution {
@@ -63,7 +65,8 @@ func pricer(card *pricing.Card) usagebody.Pricer {
 		if card == nil {
 			return usagebody.Annotation{}, false
 		}
-		return usagebody.Annotation{Cost: pricing.Compute(card, b), RateCardID: card.ID}, true
+		cost := pricing.Compute(card, b)
+		return usagebody.Annotation{Cost: cost, RateCardID: card.ID}, cost.Status != pricing.StatusUnknown
 	}
 }
 
@@ -85,11 +88,14 @@ func After(e *Env, req *abi.ResponseInterceptRequest) abi.ResponseInterceptRespo
 		return headersOnly(e, pricing.StatusUnknown)
 	}
 	cost := pricing.Compute(r.Card, b)
+	if cost.Status == pricing.StatusUnknown {
+		return headersOnly(e, pricing.StatusUnknown)
+	}
 	var resp abi.ResponseInterceptResponse
 	if e.InjectHeaders {
 		resp.Headers = http.Header{
 			HeaderPricing: {cost.Status},
-			HeaderCost:    {strconv.FormatFloat(cost.Total, 'f', 6, 64)},
+			HeaderCost:    {costHeader(cost.Total)},
 		}
 	}
 	if e.InjectBody {
@@ -110,6 +116,7 @@ func headersOnly(e *Env, status string) abi.ResponseInterceptResponse {
 // Chunk handles one stream call (header-init or payload).
 func Chunk(e *Env, states *States, req *abi.StreamChunkInterceptRequest) abi.StreamChunkInterceptResponse {
 	if req.ChunkIndex == abi.StreamHeaderInitIndex {
+		states.Delete(req.RequestID)
 		if !e.InjectBody && !e.InjectHeaders || !e.clientAllowed(req.Metadata) {
 			return abi.StreamChunkInterceptResponse{}
 		}
@@ -135,12 +142,26 @@ func Chunk(e *Env, states *States, req *abi.StreamChunkInterceptRequest) abi.Str
 	if st == nil {
 		return abi.StreamChunkInterceptResponse{}
 	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.done {
+		return abi.StreamChunkInterceptResponse{}
+	}
 	res := usagebody.Stream(st.format, req.Body, &st.start, pricer(st.card))
 	if res.Done {
-		states.Delete(req.RequestID)
+		st.done = true
+		states.deleteIf(req.RequestID, st)
 	}
 	if res.Body == nil {
 		return abi.StreamChunkInterceptResponse{}
 	}
 	return abi.StreamChunkInterceptResponse{Body: res.Body}
+}
+
+func costHeader(cost float64) string {
+	precision := 6
+	if cost != math.Round(cost*1e6)/1e6 {
+		precision = -1
+	}
+	return strconv.FormatFloat(cost, 'f', precision, 64)
 }

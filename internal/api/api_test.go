@@ -456,3 +456,53 @@ func TestDashboardAssetsServedWithoutAuth(t *testing.T) {
 		t.Fatalf("%s/: %d, want 404", DashboardPath, r.StatusCode)
 	}
 }
+
+func TestFeedInfoReportsActualSnapshotSource(t *testing.T) {
+	cfg, err := config.Parse(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Pricing.FeedURL = "https://new.example/prices.json"
+	v := &View{Config: cfg, Now: func() time.Time { return now }, Feed: catalog.State{
+		Catalog: &pricing.Catalog{}, SourceURL: "https://old.example/prices.json", FetchedMS: now.UnixMilli(), Status: "ok",
+	}}
+	got := v.feedInfo()
+	if got.URL != v.Feed.SourceURL || got.Status != "stale" {
+		t.Fatalf("old snapshot reported as current source: %+v", got)
+	}
+}
+
+func TestLargeFiniteSummaryAmountsRemainRepresentable(t *testing.T) {
+	for _, value := range []float64{1e302, math.MaxFloat64, -1e302} {
+		got := round9(value)
+		if got == nil || math.IsInf(*got, 0) || math.IsNaN(*got) {
+			t.Fatalf("round9(%g) = %v", value, got)
+		}
+		if _, err := json.Marshal(got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, value := range []float64{math.Inf(1), math.Inf(-1), math.NaN()} {
+		if got := round9(value); got != nil {
+			t.Fatalf("unrepresentable amount %g returned %v", value, got)
+		}
+	}
+	a := acc{requests: 2, cost: math.MaxFloat64}
+	a.add(store.Agg{Requests: 1, Cost: math.MaxFloat64})
+	if a.costPtr() != nil {
+		t.Fatal("overflowed aggregate must be unknown, not a fabricated finite estimate")
+	}
+	resp := jsonResp(http.StatusOK, totals{Requests: a.requests, CostUSD: a.costPtr()})
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(resp.Body, []byte(`"cost_usd":null`)) {
+		t.Fatalf("overflow response: %s", resp.Body)
+	}
+}
+
+func TestSummaryRejectsCrossGroupTokenOverflow(t *testing.T) {
+	var a acc
+	a.add(store.Agg{Requests: 1, TInput: math.MaxInt64})
+	a.add(store.Agg{Requests: 1, TInput: 1})
+	if !a.overflow || a.tok.Input < 0 {
+		t.Fatalf("overflowed token totals: %+v", a)
+	}
+}

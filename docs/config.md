@@ -17,7 +17,7 @@ A complete annotated example is in [`examples/config.yaml`](../examples/config.y
 | `pricing.feed-url` | `https://catalog.stencil.so/models.json.zstd` | Pricing catalog (the feed omp uses). zstd or plain JSON. |
 | `pricing.refresh-hours` | `24` | Refresh interval (±5 % jitter). Failed fetches retry after min(refresh, 15 min). |
 | `pricing.feed-timeout-seconds` | `30` | Fetch timeout. |
-| `pricing.feed-max-bytes` | `67108864` | Cap on the decoded feed size (minimum 1 MiB). |
+| `pricing.feed-max-bytes` | `67108864` | Cap on downloaded and decoded feed bytes (minimum 1 MiB; legacy-host limitation below). |
 | `pricing.catalog-search-order` | `[anthropic, openai, google]` | Catalog providers searched for a model id when nothing else resolves it. |
 | `pricing.provider-map` | see below | CPA provider name (exact or glob) → catalog provider. Merged over the defaults. |
 | `pricing.provider-families` | `{}` | CPA provider (exact or glob) → `openai`, `anthropic` or `gemini` token-normalization family. |
@@ -26,7 +26,7 @@ A complete annotated example is in [`examples/config.yaml`](../examples/config.y
 | `inject.body` | `true` | Add `usage.cost` / `usage.cost_details` to response bodies. |
 | `inject.headers` | `true` | Add `X-CliProxy-Pricing` / `X-CliProxy-Cost-USD`. |
 | `clients.fingerprint-secret-env` | `CLIPROXY_COSTS_HMAC_SECRET` | Env var holding the HMAC secret for client fingerprints. Unset → fingerprints are disabled (`client` is `null`). |
-| `clients.labels` | `[]` | `[{fingerprint, label, inject}]`. `inject: false` disables cost injection for that client. |
+| `clients.labels` | `[]` | `[{fingerprint, label, inject}]`. `inject: false` disables cost injection for that client. If any client is excluded but its identity cannot be determined, injection is skipped. |
 | `subscriptions` | `[]` | `[{credential, label, usd-per-month}]` for the dashboard value panel. `credential` is the 16-hex CPA auth index. |
 | `credential-labels` | `{}` | Auth index → display label. |
 | `currency.display` | `USD` | Default dashboard currency; must be in `currency.currencies`. |
@@ -122,3 +122,19 @@ translates usage between formats.
   model and mark requests above their size `partial`.
 - Unknown models are stored with `cost = null`, `pricing_status = unknown`.
 - Each row stores the rate-card id; history is never repriced.
+
+## Feed request lifecycle
+
+The plugin fetches prices and exchange rates through CPA's host HTTP API.
+On current hosts, streamed reads cap transferred bytes, and operation
+cancellation stops timed-out or shutdown requests.
+Older hosts without operation support allow at most one outstanding request per
+feed worker. Hosts without streaming support may buffer the full HTTP response
+before the plugin can reject its size. A timeout stops waiting, but the host must finish that request
+before the worker can retry. Late responses do not replace the saved snapshot.
+
+Feed URLs must not contain user credentials or fragments. Local HTTP mirrors
+remain supported. Pricing and exchange-rate sources are trusted inputs, so use
+an approved source and validate important rates. The rates API reports the
+source of the loaded snapshot, which can differ from the configured source
+while a new feed is unavailable.

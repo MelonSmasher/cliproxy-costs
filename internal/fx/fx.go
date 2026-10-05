@@ -128,17 +128,24 @@ func Rates(currencies []string, perEUR, fixed map[string]float64) map[string]flo
 		if c == config.BaseCurrency {
 			continue
 		}
+		var rate float64
 		switch {
-		case usd > 0 && c == "EUR":
-			out[c] = sig6(1 / usd)
-		case usd > 0 && perEUR[c] > 0:
-			out[c] = sig6(perEUR[c] / usd)
-		case fixed[c] > 0:
+		case validRate(usd) && c == "EUR":
+			rate = sig6(1 / usd)
+		case validRate(usd) && validRate(perEUR[c]):
+			rate = sig6(perEUR[c] / usd)
+		}
+		switch {
+		case validRate(rate):
+			out[c] = rate
+		case validRate(fixed[c]):
 			out[c] = fixed[c]
 		}
 	}
 	return out
 }
+
+func validRate(v float64) bool { return v > 0 && !math.IsInf(v, 0) }
 
 // State is the published FX state.
 type State struct {
@@ -155,7 +162,7 @@ type Settings struct {
 
 // Worker owns the ECB fetch lifecycle.
 type Worker struct {
-	host    abi.Host
+	client  *abi.HTTPClient
 	store   *store.Store
 	now     func() time.Time
 	publish func(State)
@@ -169,7 +176,7 @@ type Worker struct {
 
 // New creates a worker. publish must be cheap and non-blocking.
 func New(host abi.Host, st *store.Store, s Settings, publish func(State)) *Worker {
-	return &Worker{host: host, store: st, now: time.Now, publish: publish, settings: s, wake: make(chan struct{}, 1)}
+	return &Worker{client: abi.NewHTTPClient(host), store: st, now: time.Now, publish: publish, settings: s, wake: make(chan struct{}, 1)}
 }
 
 // Load installs the persisted snapshot and last error.
@@ -233,9 +240,15 @@ func (w *Worker) Run(ctx context.Context) {
 		case st.Error != "" && attempted == s.URL:
 			due = min(s.Refresh, 15*time.Minute)
 		case st.Error == "" && st.Snapshot != nil && st.Snapshot.URL == s.URL:
-			age := w.now().Sub(time.UnixMilli(st.Snapshot.FetchedMS))
+			age := max(time.Duration(0), w.now().Sub(time.UnixMilli(st.Snapshot.FetchedMS)))
 			jitter := time.Duration(float64(s.Refresh) * (rand.Float64()*0.1 - 0.05))
-			due = max(0, s.Refresh-age+jitter)
+			interval := s.Refresh
+			if jitter > 0 && interval > time.Duration(math.MaxInt64)-jitter {
+				interval = time.Duration(math.MaxInt64)
+			} else {
+				interval += jitter
+			}
+			due = max(0, interval-age)
 		}
 		if due != 0 {
 			var t *time.Timer
@@ -246,6 +259,9 @@ func (w *Worker) Run(ctx context.Context) {
 			}
 			select {
 			case <-ctx.Done():
+				if t != nil {
+					t.Stop()
+				}
 				return
 			case <-w.wake:
 				if t != nil {
@@ -269,6 +285,10 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) FetchOnce(ctx context.Context) {
 	w.mu.Lock()
 	s, prev := w.settings, w.state
+	if !s.Enabled {
+		w.mu.Unlock()
+		return
+	}
 	w.attemptedURL = s.URL
 	w.mu.Unlock()
 	attempt := w.now()
@@ -285,7 +305,9 @@ func (w *Worker) FetchOnce(ctx context.Context) {
 		c := *prev.Snapshot
 		c.FetchedMS = attempt.UnixMilli()
 		next.Snapshot = &c
-		_ = w.store.TouchFX(bg, c.FetchedMS)
+		if err := w.store.TouchFX(bg, c.FetchedMS); err != nil {
+			next.Error = "persist snapshot: " + err.Error()
+		}
 	default:
 		if err := w.store.SaveFX(bg, *snap); err != nil {
 			next.Error = "persist snapshot: " + err.Error()
@@ -302,24 +324,16 @@ func (w *Worker) fetch(ctx context.Context, s Settings, prev State) (*store.FXSn
 	if p := prev.Snapshot; p != nil && p.URL == s.URL && p.LastModified != "" {
 		headers["If-Modified-Since"] = []string{p.LastModified}
 	}
-	var resp abi.HostHTTPResponse
-	errc := make(chan error, 1)
-	go func() {
-		errc <- abi.CallResult(w.host, abi.MethodHostHTTPDo, abi.HostHTTPRequest{Method: http.MethodGet, URL: s.URL, Headers: headers}, &resp)
-	}()
-	timer := time.NewTimer(Timeout)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return nil, false, ctx.Err()
-	case <-timer.C:
+	fetchCtx, cancel := context.WithTimeout(ctx, Timeout)
+	defer cancel()
+	resp, err := w.client.Do(fetchCtx, abi.HostHTTPRequest{Method: http.MethodGet, URL: s.URL, Headers: headers}, MaxBytes)
+	if errors.Is(err, context.DeadlineExceeded) {
 		return nil, false, fmt.Errorf("fx fetch timed out after %s", Timeout)
-	case err := <-errc:
-		if err != nil {
-			return nil, false, fmt.Errorf("fx fetch: %w", err)
-		}
 	}
-	if resp.StatusCode == http.StatusNotModified && prev.Snapshot != nil && prev.Snapshot.URL == s.URL {
+	if err != nil {
+		return nil, false, fmt.Errorf("fx fetch: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotModified && prev.Snapshot != nil && prev.Snapshot.URL == s.URL && prev.Snapshot.LastModified != "" {
 		return nil, true, nil
 	}
 	if resp.StatusCode != http.StatusOK {

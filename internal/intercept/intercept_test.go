@@ -1,6 +1,7 @@
 package intercept
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -131,5 +132,65 @@ func TestStreamStateEviction(t *testing.T) {
 	now = now.Add(2 * time.Minute)
 	if st.Get("ttl") != nil {
 		t.Fatal("expired entry returned")
+	}
+}
+
+func TestCostHeaderPreservesSubMicroDollarCost(t *testing.T) {
+	e := env(t, "pricing:\n  overrides:\n    tiny: {input: 0.02}\n", "")
+	r := After(e, &abi.ResponseInterceptRequest{SourceFormat: "openai", Model: "tiny", Body: []byte(`{"usage":{"prompt_tokens":1}}`)})
+	if got := hdr(r.Headers, HeaderCost); got != "0.00000002" {
+		t.Fatalf("small estimate rounded away: %q", got)
+	}
+}
+
+func TestConcurrentStreamCallbacksAreSafe(t *testing.T) {
+	e := env(t, baseYAML, "")
+	states := NewStates(64, time.Minute)
+	Chunk(e, states, chunk("shared", abi.StreamHeaderInitIndex, ""))
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Go(func() {
+			Chunk(e, states, chunk("shared", 0, `{"type":"message_start","message":{"usage":{"input_tokens":10}}}`))
+			Chunk(e, states, chunk("shared", 1, `{"type":"message_delta","usage":{"output_tokens":20}}`))
+		})
+	}
+	wg.Wait()
+	if states.Get("shared") != nil {
+		t.Fatal("completed stream retained")
+	}
+}
+
+func TestLateChunkCannotDeleteReplacementState(t *testing.T) {
+	states := NewStates(64, time.Minute)
+	old, replacement := &stream{}, &stream{}
+	states.Put("r", old)
+	states.Put("r", replacement)
+	states.deleteIf("r", old)
+	if states.Get("r") != replacement {
+		t.Fatal("late callback deleted a replacement stream")
+	}
+}
+
+func TestClientOptOutFailsClosedWithoutIdentity(t *testing.T) {
+	for _, secret := range []string{"", "0123456789abcdef0123456789abcdef"} {
+		e := env(t, baseYAML, secret)
+		e.NoInject["0123456789abcdef"] = true
+		for _, metadata := range []map[string]any{nil, {"caller_scope": ""}, {"caller_scope": 123}} {
+			req := &abi.ResponseInterceptRequest{SourceFormat: "openai", Model: "priced-fixture", Body: []byte(chatBody), Metadata: metadata}
+			if r := After(e, req); r.Body != nil || r.Headers != nil {
+				t.Fatalf("unidentified client annotated: %+v", r)
+			}
+			states := NewStates(64, time.Minute)
+			init := chunk("private", abi.StreamHeaderInitIndex, "")
+			init.Metadata = metadata
+			if r := Chunk(e, states, init); r.Body != nil || r.Headers != nil || states.Len() != 0 {
+				t.Fatal("unidentified stream annotated")
+			}
+		}
+	}
+	e := env(t, baseYAML, "")
+	e.NoInject["0123456789abcdef"] = true
+	if e.clientAllowed(map[string]any{"caller_scope": "scope-without-secret"}) {
+		t.Fatal("missing secret must not bypass client opt-out")
 	}
 }

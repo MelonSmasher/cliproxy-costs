@@ -47,6 +47,7 @@ type state struct {
 	secret   []byte
 	notices  []string
 	store    *store.Store
+	learned  *pricing.Learned
 }
 
 // Plugin is the process-wide plugin instance.
@@ -55,9 +56,8 @@ type Plugin struct {
 	version string
 	now     func() time.Time
 
-	learned pricing.Learned
-	states  atomic.Pointer[intercept.States]
-	cur     atomic.Pointer[state]
+	states atomic.Pointer[intercept.States]
+	cur    atomic.Pointer[state]
 
 	mu      sync.Mutex // serializes lifecycle transitions
 	running *runtime
@@ -68,13 +68,14 @@ type Plugin struct {
 
 // runtime holds the resources bound to one db-path.
 type runtime struct {
-	dbPath string
-	store  *store.Store
-	feed   *catalog.Worker
-	fx     *fx.Worker
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	dbPath  string
+	store   *store.Store
+	learned *pricing.Learned
+	feed    *catalog.Worker
+	fx      *fx.Worker
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 var global atomic.Pointer[Plugin]
@@ -152,6 +153,9 @@ func (p *Plugin) configure(raw []byte) []byte {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return abi.Fail("invalid_request", "decode lifecycle request: "+err.Error())
 	}
+	if req.SchemaVersion != abi.SchemaVersion {
+		return abi.Fail("unsupported_schema", "requires JSON schema 6")
+	}
 	cfg, err := config.Parse(req.ConfigYAML)
 	if err != nil {
 		return abi.Fail("invalid_config", err.Error())
@@ -188,7 +192,7 @@ func (p *Plugin) apply(cfg *config.Config) error {
 		p.cur.Store(nil)
 		p.stopRuntime()
 	}
-	if prev == nil || prev.cfg.StreamState != cfg.StreamState || p.states.Load() == nil {
+	if p.running == nil || prev == nil || prev.cfg.StreamState != cfg.StreamState || p.states.Load() == nil {
 		p.states.Store(intercept.NewStates(cfg.StreamState.MaxEntries, time.Duration(cfg.StreamState.TTLSeconds)*time.Second))
 	}
 	settings := catalog.Settings{
@@ -211,6 +215,9 @@ func (p *Plugin) apply(cfg *config.Config) error {
 		p.running.feed.Update(settings)
 		p.running.fx.Update(fxSettings)
 	}
+	if fresh {
+		p.secretNotice = ""
+	}
 	if fresh || prev == nil || !hmac.Equal(prev.secret, secret) {
 		p.checkSecret(p.running.store, secret)
 	}
@@ -230,7 +237,8 @@ func (p *Plugin) apply(cfg *config.Config) error {
 
 // install builds and publishes a new state from config + feed.
 func (p *Plugin) install(cfg *config.Config, secret []byte, feed catalog.State, fxs fx.State, st *store.Store) {
-	res := pricing.NewResolver(cfg, feed.Catalog, &p.learned)
+	learned := p.running.learned
+	res := pricing.NewResolver(cfg, feed.Catalog, learned)
 	noInject := map[string]bool{}
 	for _, l := range cfg.Clients.Labels {
 		if l.Inject != nil && !*l.Inject {
@@ -245,7 +253,7 @@ func (p *Plugin) install(cfg *config.Config, secret []byte, feed catalog.State, 
 		notices = append(notices, p.secretNotice)
 	}
 	p.cur.Store(&state{
-		cfg: cfg, resolver: res, feed: feed, fx: fxs, secret: secret, notices: notices, store: st,
+		cfg: cfg, resolver: res, feed: feed, fx: fxs, secret: secret, notices: notices, store: st, learned: learned,
 		env: &intercept.Env{Resolver: res, InjectBody: cfg.Inject.Body, InjectHeaders: cfg.Inject.Headers, Secret: secret, NoInject: noInject},
 	})
 }
@@ -260,7 +268,7 @@ func (p *Plugin) onFeed(fs catalog.State) {
 		next := *old
 		next.feed = fs
 		if fs.Catalog != old.feed.Catalog {
-			next.resolver = pricing.NewResolver(old.cfg, fs.Catalog, &p.learned)
+			next.resolver = pricing.NewResolver(old.cfg, fs.Catalog, old.learned)
 			env := *old.env
 			env.Resolver = next.resolver
 			next.env = &env
@@ -303,10 +311,11 @@ func (p *Plugin) openRuntime(cfg *config.Config, dbPath string, settings catalog
 		_ = st.Close(time.Second)
 		return err
 	}
+	models := &pricing.Learned{}
 	for m, prov := range learned {
-		p.learned.Set(m, prov)
+		models.Set(m, prov)
 	}
-	rt := &runtime{dbPath: dbPath, store: st, ctx: ctx, cancel: cancel}
+	rt := &runtime{dbPath: dbPath, store: st, learned: models, ctx: ctx, cancel: cancel}
 	rt.feed = catalog.New(p.host, st, settings, p.onFeed)
 	if err := rt.feed.Load(ctx); err != nil {
 		p.log("warn", "feed snapshot load failed", map[string]any{"error": err.Error()})
@@ -449,7 +458,7 @@ func (p *Plugin) usage(raw []byte) []byte {
 	if err := json.Unmarshal(raw, &rec); err != nil {
 		return abi.OK(nil)
 	}
-	res := ledger.Ingest(&rec, s.secret, s.resolver, &p.learned, s.feed.ETag)
+	res := ledger.Ingest(&rec, s.secret, s.resolver, s.learned, s.feed.ETag)
 	s.store.Enqueue(res.Item)
 	return abi.OK(nil)
 }

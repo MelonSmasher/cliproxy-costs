@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -199,6 +201,13 @@ func Parse(data []byte) (*Config, error) {
 		if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("config: %w", err)
 		}
+		var extra any
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			if err != nil {
+				return nil, fmt.Errorf("config: %w", err)
+			}
+			return nil, errors.New("config: expected exactly one YAML document")
+		}
 	}
 	merged := DefaultProviderMap()
 	for k, v := range c.Pricing.ProviderMap {
@@ -218,17 +227,17 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.DBPath) == "" {
 		add("db-path must not be empty")
 	}
-	if u, err := url.Parse(c.Pricing.FeedURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		add("pricing.feed-url must be an http(s) URL")
+	if !validFeedURL(c.Pricing.FeedURL) {
+		add("pricing.feed-url must be an http(s) URL with a hostname and valid port, without credentials or fragment")
 	}
-	if c.Pricing.RefreshHours <= 0 || math.IsNaN(c.Pricing.RefreshHours) {
-		add("pricing.refresh-hours must be > 0")
+	if !validDuration(c.Pricing.RefreshHours, time.Hour) {
+		add("pricing.refresh-hours must be finite, positive and fit in a duration")
 	}
-	if c.Pricing.FeedTimeoutSeconds <= 0 {
-		add("pricing.feed-timeout-seconds must be > 0")
+	if c.Pricing.FeedTimeoutSeconds <= 0 || int64(c.Pricing.FeedTimeoutSeconds) > math.MaxInt64/int64(time.Second) {
+		add("pricing.feed-timeout-seconds must be > 0 and fit in a duration")
 	}
-	if c.Pricing.FeedMaxBytes < 1<<20 {
-		add("pricing.feed-max-bytes must be >= 1048576")
+	if c.Pricing.FeedMaxBytes < 1<<20 || c.Pricing.FeedMaxBytes == math.MaxInt64 {
+		add("pricing.feed-max-bytes must be >= 1048576 and < 9223372036854775807")
 	}
 	for k, v := range c.Pricing.ProviderMap {
 		if _, err := path.Match(k, ""); err != nil {
@@ -285,8 +294,8 @@ func (c *Config) validate() error {
 		if !hex16.MatchString(s.Credential) {
 			add("subscriptions[%d].credential must be a 16-hex auth index", i)
 		}
-		if s.USDPerMonth < 0 || math.IsNaN(s.USDPerMonth) {
-			add("subscriptions[%d].usd-per-month must be >= 0", i)
+		if s.USDPerMonth < 0 || math.IsNaN(s.USDPerMonth) || math.IsInf(s.USDPerMonth, 0) {
+			add("subscriptions[%d].usd-per-month must be finite and >= 0", i)
 		}
 	}
 	for k := range c.CredentialLabels {
@@ -294,24 +303,50 @@ func (c *Config) validate() error {
 			add("credential-labels key %q must be a 16-hex auth index", k)
 		}
 	}
-	if c.Quota.StaleAfterMinutes <= 0 {
-		add("quota.stale-after-minutes must be > 0")
+	if !validDuration(c.Quota.StaleAfterMinutes, time.Minute) {
+		add("quota.stale-after-minutes must be finite, positive and fit in a duration")
 	}
-	if c.Retention.RawDays < 1 {
-		add("retention.raw-days must be >= 1")
+	if c.Retention.RawDays < 1 || int64(c.Retention.RawDays) > math.MaxInt64/int64(24*time.Hour) {
+		add("retention.raw-days must be >= 1 and fit in a duration")
 	}
 	c.Currency.validate(add)
 	if c.Queue.Capacity < 1 || c.Queue.BatchSize < 1 || c.Queue.FlushMS < 1 {
 		add("queue.capacity, queue.batch-size and queue.flush-ms must be >= 1")
 	}
+	if int64(c.Queue.FlushMS) > math.MaxInt64/int64(time.Millisecond) {
+		add("queue.flush-ms must fit in a duration")
+	}
 	if c.StreamState.MaxEntries < 16 || c.StreamState.TTLSeconds < 1 {
 		add("stream-state.max-entries must be >= 16 and stream-state.ttl-seconds >= 1")
+	}
+	if int64(c.StreamState.TTLSeconds) > math.MaxInt64/int64(time.Second) {
+		add("stream-state.ttl-seconds must fit in a duration")
 	}
 	if len(errs) > 0 {
 		sort.Strings(errs)
 		return errors.New("config: " + strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// validDuration rejects values that would overflow or truncate to zero when
+// converted to time.Duration. The strict upper bound handles float64's
+// rounding of MaxInt64 to 2^63.
+func validDuration(value float64, unit time.Duration) bool {
+	ns := value * float64(unit)
+	return ns >= 1 && ns < float64(math.MaxInt64)
+}
+
+func validFeedURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		return err == nil && n > 0 && n <= 65535
+	}
+	return !strings.HasSuffix(u.Host, ":")
 }
 
 func (r Rates) check() error {
@@ -348,14 +383,14 @@ func (c *Currency) validate(add func(string, ...any)) {
 	default:
 		add("currency.source must be ecb, fixed or off")
 	}
-	if u, err := url.Parse(c.ECBURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		add("currency.ecb-url must be an http(s) URL")
+	if !validFeedURL(c.ECBURL) {
+		add("currency.ecb-url must be an http(s) URL with a hostname and valid port, without credentials or fragment")
 	}
-	if !(c.RefreshHours > 0) {
-		add("currency.refresh-hours must be > 0")
+	if !validDuration(c.RefreshHours, time.Hour) {
+		add("currency.refresh-hours must be finite, positive and fit in a duration")
 	}
-	if !(c.StaleAfterHours > 0) {
-		add("currency.stale-after-hours must be > 0")
+	if !validDuration(c.StaleAfterHours, time.Hour) {
+		add("currency.stale-after-hours must be finite, positive and fit in a duration")
 	}
 	for code, v := range c.Fixed {
 		switch {

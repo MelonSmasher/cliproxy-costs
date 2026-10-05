@@ -118,7 +118,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	switch err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&v); err {
 	case nil:
 		n, err := strconv.Atoi(v)
-		if err != nil {
+		if err != nil || n < 0 {
 			return fmt.Errorf("store: bad schema_version %q", v)
 		}
 		current = n

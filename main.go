@@ -58,7 +58,7 @@ import "C"
 
 import (
 	"fmt"
-	"sync/atomic"
+	"sync"
 	// The dashboard sends its IANA zone (summary?tz=). Windows has no system
 	// zoneinfo and CPA hosts carry no Go install, so the database is embedded.
 	_ "time/tzdata"
@@ -75,11 +75,36 @@ func main() {}
 
 // hostBridge calls back into the host through the C function table. After
 // shutdown begins every call fails without touching host memory.
-type hostBridge struct{ closed atomic.Bool }
+// The lock spans callback execution and freeing its response. The host owns
+// both the callback context and function table until native shutdown returns.
+type hostBridge struct {
+	mu     sync.RWMutex
+	closed bool
+}
+
+// maxRPCBytes bounds native copies before conversion to C.int. It permits
+// ordinary large responses (including a base64-encoded 64 MiB feed) while
+// rejecting malformed ABI lengths.
+const maxRPCBytes = 128 << 20
+
+func validBuffer(present bool, n uint64) bool {
+	return n <= maxRPCBytes && (present || n == 0)
+}
+
+func (h *hostBridge) close() {
+	h.mu.Lock()
+	h.closed = true
+	h.mu.Unlock()
+}
 
 func (h *hostBridge) Call(method string, request []byte) ([]byte, error) {
-	if h.closed.Load() {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.closed {
 		return nil, abi.ErrHostClosed
+	}
+	if len(request) > maxRPCBytes {
+		return nil, fmt.Errorf("host request exceeds native buffer limit")
 	}
 	cMethod := C.CString(method)
 	defer C.free(unsafe.Pointer(cMethod))
@@ -90,10 +115,15 @@ func (h *hostBridge) Call(method string, request []byte) ([]byte, error) {
 	}
 	var out C.cliproxy_buffer
 	rc := C.costs_host_call(cMethod, (*C.uint8_t)(cReq), C.size_t(len(request)), &out)
-	var resp []byte
 	if out.ptr != nil {
+		defer C.costs_host_free(out.ptr, out.len)
+	}
+	if !validBuffer(out.ptr != nil, uint64(out.len)) {
+		return nil, fmt.Errorf("invalid host response buffer")
+	}
+	var resp []byte
+	if out.len > 0 {
 		resp = C.GoBytes(out.ptr, C.int(out.len))
-		C.costs_host_free(out.ptr, out.len)
 	}
 	if rc != 0 {
 		return resp, fmt.Errorf("host call %s returned %d", method, int(rc))
@@ -105,7 +135,7 @@ var bridge = &hostBridge{}
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, api *C.cliproxy_plugin_api) C.int {
-	if api == nil {
+	if api == nil || host == nil || host.abi_version != abi.ABIVersion || host.call == nil || host.free_buffer == nil {
 		return 1
 	}
 	C.costs_set_host(host)
@@ -115,12 +145,27 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, api *C.cliproxy_plugin_api)
 }
 
 //export cliproxyPluginCall
-func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
+func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) (code C.int) {
+	if response == nil {
+		return 1
+	}
+	response.ptr, response.len = nil, 0
+	defer func() {
+		if recover() != nil {
+			code = 1
+		}
+	}()
+	if method == nil || !validBuffer(request != nil, uint64(requestLen)) {
+		return 1
+	}
 	var req []byte
 	if request != nil && requestLen > 0 {
 		req = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
 	out := plugin.Handle(C.GoString(method), req)
+	if len(out) > maxRPCBytes {
+		return 1
+	}
 	response.ptr = C.CBytes(out)
 	response.len = C.size_t(len(out))
 	return 0
@@ -137,6 +182,6 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 func cliproxyPluginShutdown() {
 	// Host callbacks are closed first: the host tears down the callback
 	// instance before invoking this export and frees the table right after.
-	bridge.closed.Store(true)
+	bridge.close()
 	plugin.Shutdown()
 }

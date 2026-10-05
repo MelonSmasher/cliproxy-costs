@@ -6,6 +6,7 @@
 package usagebody
 
 import (
+	"math"
 	"strconv"
 
 	"github.com/tidwall/gjson"
@@ -62,6 +63,14 @@ func (a Annotation) detailsJSON() []byte {
 // Annotate inserts cost and cost_details into the object at usagePath of the
 // JSON document doc. It returns ok=false (and doc unchanged) on any failure.
 func Annotate(doc []byte, usagePath string, a Annotation) ([]byte, bool) {
+	if a.Cost.Status == pricing.StatusUnknown {
+		return doc, false
+	}
+	for _, v := range []float64{a.Cost.Total, a.Cost.Input, a.Cost.CacheRead, a.Cost.CacheWrite, a.Cost.Output} {
+		if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return doc, false
+		}
+	}
 	opts := &sjson.Options{Optimistic: true}
 	out, err := sjson.SetBytesOptions(doc, usagePath+".cost", a.Cost.Total, opts)
 	if err != nil {
@@ -76,9 +85,42 @@ func Annotate(doc []byte, usagePath string, a Annotation) ([]byte, bool) {
 
 func isUsage(u gjson.Result) bool { return u.IsObject() }
 
+// Counters must be JSON integers. gjson.Int otherwise coerces strings,
+// fractions and out-of-range values, turning malformed usage into a price.
+func validCounters(u gjson.Result, paths ...string) bool {
+	for _, path := range paths {
+		value := u.Get(path)
+		if !value.Exists() {
+			continue
+		}
+		if value.Type != gjson.Number {
+			return false
+		}
+		n, err := strconv.ParseInt(value.Raw, 10, 64)
+		if err != nil || n < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func validDetails(u gjson.Result, paths ...string) bool {
+	for _, path := range paths {
+		value := u.Get(path)
+		if value.Exists() && value.Type != gjson.Null && !value.IsObject() {
+			return false
+		}
+	}
+	return true
+}
+
 // ChatBuckets reads an OpenAI Chat Completions usage object.
 func ChatBuckets(u gjson.Result) (pricing.Buckets, bool) {
 	if !isUsage(u) || !u.Get("prompt_tokens").Exists() && !u.Get("completion_tokens").Exists() {
+		return pricing.Buckets{}, false
+	}
+	if !validCounters(u, "prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details.cached_tokens", "prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.cache_creation_input_tokens", "cache_creation_input_tokens", "completion_tokens_details.reasoning_tokens") ||
+		!validDetails(u, "prompt_tokens_details", "completion_tokens_details") {
 		return pricing.Buckets{}, false
 	}
 	cached := u.Get("prompt_tokens_details.cached_tokens").Int()
@@ -89,13 +131,18 @@ func ChatBuckets(u gjson.Result) (pricing.Buckets, bool) {
 	if cw == 0 {
 		cw = u.Get("cache_creation_input_tokens").Int()
 	}
-	return pricing.Buckets{
-		Input:      nonNeg(u.Get("prompt_tokens").Int() - cached - cw),
+	input, output := u.Get("prompt_tokens").Int(), u.Get("completion_tokens").Int()
+	if cached > input || cw > input-cached {
+		return pricing.Buckets{}, false
+	}
+	b := pricing.Buckets{
+		Input:      input - cached - cw,
 		CacheRead:  cached,
 		CacheWrite: cw,
-		Output:     u.Get("completion_tokens").Int(),
+		Output:     output,
 		Reasoning:  u.Get("completion_tokens_details.reasoning_tokens").Int(),
-	}, true
+	}
+	return b, pricing.ValidBuckets(b)
 }
 
 // ResponsesBuckets reads an OpenAI Responses usage object.
@@ -103,19 +150,30 @@ func ResponsesBuckets(u gjson.Result) (pricing.Buckets, bool) {
 	if !isUsage(u) || !u.Get("input_tokens").Exists() && !u.Get("output_tokens").Exists() {
 		return pricing.Buckets{}, false
 	}
+	if !validCounters(u, "input_tokens", "output_tokens", "total_tokens", "input_tokens_details.cached_tokens", "output_tokens_details.reasoning_tokens") ||
+		!validDetails(u, "input_tokens_details", "output_tokens_details") {
+		return pricing.Buckets{}, false
+	}
 	cached := u.Get("input_tokens_details.cached_tokens").Int()
-	return pricing.Buckets{
-		Input:     nonNeg(u.Get("input_tokens").Int() - cached),
+	input := u.Get("input_tokens").Int()
+	if cached > input {
+		return pricing.Buckets{}, false
+	}
+	b := pricing.Buckets{
+		Input:     input - cached,
 		CacheRead: cached,
 		Output:    u.Get("output_tokens").Int(),
 		Reasoning: u.Get("output_tokens_details.reasoning_tokens").Int(),
-	}, true
+	}
+	return b, pricing.ValidBuckets(b)
 }
 
 // MessagesUsage is an Anthropic Messages usage object (input excludes cache).
 type MessagesUsage struct {
 	Input, CacheRead, CacheWrite, Output int64
 	present                              bool
+	invalid                              bool
+	fields                               uint8
 }
 
 // ReadMessagesUsage reads an Anthropic usage object.
@@ -123,37 +181,49 @@ func ReadMessagesUsage(u gjson.Result) MessagesUsage {
 	if !isUsage(u) {
 		return MessagesUsage{}
 	}
+	if !validCounters(u, "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens") {
+		return MessagesUsage{invalid: true}
+	}
+	var fields uint8
+	for i, key := range []string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"} {
+		if u.Get(key).Exists() {
+			fields |= 1 << i
+		}
+	}
 	return MessagesUsage{
 		Input:      u.Get("input_tokens").Int(),
 		CacheRead:  u.Get("cache_read_input_tokens").Int(),
 		CacheWrite: u.Get("cache_creation_input_tokens").Int(),
 		Output:     u.Get("output_tokens").Int(),
-		present:    u.Get("input_tokens").Exists() || u.Get("output_tokens").Exists(),
+		present:    fields != 0,
+		fields:     fields,
 	}
 }
 
-// Merge combines a message_delta usage with the message_start usage: each
-// field comes from the delta when > 0, else from the start. (A translated
-// stream sends a placeholder input in message_start that the delta supersedes.)
+// Merge combines message_delta with message_start. An explicitly reported
+// zero supersedes the start value; only absent fields inherit the start.
 func (d MessagesUsage) Merge(start MessagesUsage) MessagesUsage {
-	pick := func(a, b int64) int64 {
-		if a > 0 {
+	pick := func(a, b int64, field uint8) int64 {
+		if d.fields&field != 0 {
 			return a
 		}
 		return b
 	}
 	return MessagesUsage{
-		Input:      pick(d.Input, start.Input),
-		CacheRead:  pick(d.CacheRead, start.CacheRead),
-		CacheWrite: pick(d.CacheWrite, start.CacheWrite),
-		Output:     pick(d.Output, start.Output),
+		Input:      pick(d.Input, start.Input, 1),
+		CacheRead:  pick(d.CacheRead, start.CacheRead, 2),
+		CacheWrite: pick(d.CacheWrite, start.CacheWrite, 4),
+		Output:     pick(d.Output, start.Output, 8),
 		present:    d.present || start.present,
+		invalid:    d.invalid || start.invalid,
+		fields:     d.fields | start.fields,
 	}
 }
 
 // Buckets converts the usage to pricing buckets.
 func (m MessagesUsage) Buckets() (pricing.Buckets, bool) {
-	return pricing.Buckets{Input: m.Input, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite, Output: m.Output}, m.present
+	b := pricing.Buckets{Input: m.Input, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite, Output: m.Output}
+	return b, m.present && !m.invalid && pricing.ValidBuckets(b)
 }
 
 // NonStream locates usage in a non-stream body of the given canonical format.
@@ -175,11 +245,4 @@ func NonStream(format string, body []byte) (string, pricing.Buckets, bool) {
 		return "usage", b, ok
 	}
 	return "", pricing.Buckets{}, false
-}
-
-func nonNeg(v int64) int64 {
-	if v < 0 {
-		return 0
-	}
-	return v
 }

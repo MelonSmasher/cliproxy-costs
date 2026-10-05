@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Row is one ledger row (one execution attempt).
@@ -122,12 +124,18 @@ func dsn(path string, readOnly bool) string {
 	} else {
 		q = append(q, "_pragma=journal_mode(WAL)", "_pragma=synchronous(NORMAL)", "_txlock=immediate")
 	}
-	return "file:" + path + "?" + strings.Join(q, "&")
+	// Escape literal percent sequences as well as spaces. Concatenating a
+	// filesystem path into a URI can silently open a different database.
+	uri := url.URL{Path: filepath.ToSlash(path)}
+	return "file:" + uri.EscapedPath() + "?" + strings.Join(q, "&")
 }
 
 // Open creates (0700 dir, 0600 file) and migrates the database, then starts
 // the writer goroutine. onFlushErr (may be nil) is told about failed batches.
 func Open(ctx context.Context, path string, opts Options, onFlushErr func(error)) (*Store, error) {
+	if opts.Capacity <= 0 || opts.BatchSize <= 0 || opts.Flush <= 0 {
+		return nil, errors.New("store: capacity, batch size and flush interval must be positive")
+	}
 	if strings.ContainsAny(path, "?#") {
 		return nil, errors.New("store: db-path must not contain '?' or '#'")
 	}
@@ -274,10 +282,11 @@ func (s *Store) writer() {
 		if err := s.writeBatch(batch); err != nil {
 			s.writeErrs.Add(1)
 			s.lastErr.Store(err.Error())
-			for _, it := range batch {
-				if it.Row != nil {
-					s.dropped.Add(1)
-				}
+			var isolated *isolatedBatchError
+			if errors.As(err, &isolated) {
+				s.dropped.Add(isolated.droppedRows)
+			} else {
+				s.dropped.Add(rowCount(batch))
 			}
 			if s.onFlushErr != nil {
 				s.onFlushErr(err)
@@ -325,6 +334,64 @@ func boolInt(b bool) int64 {
 func (s *Store) writeBatch(batch []Item) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	err := s.writeBatchContext(ctx, batch)
+	if err == nil || len(batch) <= 1 || !rowDataConstraint(err) {
+		return err
+	}
+	// STRICT integer overflow is deterministic row data, not a database
+	// outage. The failed transaction has rolled back completely. Retry each
+	// item once so one overflowing rollup cannot discard unrelated requests.
+	// All attempts share the original deadline; never retry other DB errors.
+	var firstErr error
+	var dropped int64
+	for i, item := range batch {
+		if err := s.writeBatchContext(ctx, []Item{item}); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if !rowDataConstraint(err) {
+				dropped += rowCount(batch[i:])
+				return &isolatedBatchError{cause: err, droppedRows: dropped}
+			}
+			if item.Row != nil {
+				dropped++
+			}
+		}
+	}
+	if firstErr != nil {
+		return &isolatedBatchError{cause: firstErr, droppedRows: dropped}
+	}
+	return nil
+}
+
+// isolatedBatchError reports a partially successful replay. Its rejected-row
+// count prevents the writer from counting successfully committed siblings as
+// dropped. A whole Item (request, rollup and metadata) remains atomic.
+type isolatedBatchError struct {
+	cause       error
+	droppedRows int64
+}
+
+func (e *isolatedBatchError) Error() string {
+	return fmt.Sprintf("isolated batch: %d rows dropped: %v", e.droppedRows, e.cause)
+}
+func (e *isolatedBatchError) Unwrap() error { return e.cause }
+
+func rowCount(batch []Item) (n int64) {
+	for _, item := range batch {
+		if item.Row != nil {
+			n++
+		}
+	}
+	return n
+}
+
+func rowDataConstraint(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_DATATYPE
+}
+
+func (s *Store) writeBatchContext(ctx context.Context, batch []Item) error {
 	tx, err := s.w.BeginTx(ctx, nil)
 	if err != nil {
 		return err
