@@ -420,57 +420,73 @@ t_reasoning=t_reasoning+excluded.t_reasoning, c_total=c_total+excluded.c_total`)
 	}
 	defer upRollup.Close()
 	for _, it := range batch {
-		if r := it.Row; r != nil {
-			res, err := insRow.ExecContext(ctx,
-				r.RequestID, r.TraceID, r.RequestedAtMS, r.Provider, nullStr(r.ExecutorType), r.Model, nullStr(r.Alias), nullStr(r.ResponseModel),
-				nullStr(r.AuthID), nullStr(r.Credential), nullStr(r.AuthType), r.Client, nullStr(r.SessionID),
-				boolInt(r.Stream), boolInt(r.Generate), boolInt(r.Failed), r.FailureStatus,
-				r.LatencyMS, r.TTFTMS, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, boolInt(r.TokenMismatch),
-				r.CInput, r.CCacheRead, r.CCacheWrite, r.COutput, r.CTotal, r.PricingStatus, r.RateCardID, r.TierAbove, r.CatalogRef)
-			if err != nil {
-				return fmt.Errorf("insert request: %w", err)
-			}
-			if n, _ := res.RowsAffected(); n == 1 {
-				client := ""
-				if r.Client != nil {
-					client = *r.Client
-				}
-				var unpriced int64
-				cost := 0.0
-				if r.CTotal == nil {
-					unpriced = 1
-				} else {
-					cost = *r.CTotal
-				}
-				if _, err := upRollup.ExecContext(ctx, dayUTC(r.RequestedAtMS), r.Model, r.Provider, r.Credential, client,
-					boolInt(r.Failed), unpriced, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, cost); err != nil {
-					return fmt.Errorf("upsert rollup: %w", err)
-				}
-			}
+		if err := writeRequest(ctx, insRow, upRollup, it.Row); err != nil {
+			return err
 		}
-		if q := it.Quota; q != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO quota_snapshots (credential, auth_id, provider, observed_at_ms, snapshot_json)
-VALUES (?,?,?,?,?) ON CONFLICT(credential) DO UPDATE SET auth_id=excluded.auth_id, provider=excluded.provider,
-observed_at_ms=excluded.observed_at_ms, snapshot_json=excluded.snapshot_json WHERE excluded.observed_at_ms >= quota_snapshots.observed_at_ms`,
-				q.Credential, nullStr(q.AuthID), q.Provider, q.ObservedAtMS, string(q.SnapshotJSON)); err != nil {
-				return fmt.Errorf("upsert quota: %w", err)
-			}
-		}
-		if c := it.Card; c != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO rate_cards (id, catalog_ref, card_json, feed_etag, first_seen_ms) VALUES (?,?,?,?,?)`,
-				c.ID, c.CatalogRef, string(c.JSON), nullStr(c.FeedETag), nowMS()); err != nil {
-				return fmt.Errorf("insert rate card: %w", err)
-			}
-		}
-		if l := it.Learned; l != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO learned_models (model, catalog_provider, updated_ms) VALUES (?,?,?)
-ON CONFLICT(model) DO UPDATE SET catalog_provider=excluded.catalog_provider, updated_ms=excluded.updated_ms`,
-				l.Model, l.Provider, nowMS()); err != nil {
-				return fmt.Errorf("upsert learned: %w", err)
-			}
+		if err := writeItemMetadata(ctx, tx, it); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()
+}
+
+func writeRequest(ctx context.Context, insRow, upRollup *sql.Stmt, r *Row) error {
+	if r == nil {
+		return nil
+	}
+	res, err := insRow.ExecContext(ctx,
+		r.RequestID, r.TraceID, r.RequestedAtMS, r.Provider, nullStr(r.ExecutorType), r.Model, nullStr(r.Alias), nullStr(r.ResponseModel),
+		nullStr(r.AuthID), nullStr(r.Credential), nullStr(r.AuthType), r.Client, nullStr(r.SessionID),
+		boolInt(r.Stream), boolInt(r.Generate), boolInt(r.Failed), r.FailureStatus,
+		r.LatencyMS, r.TTFTMS, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, boolInt(r.TokenMismatch),
+		r.CInput, r.CCacheRead, r.CCacheWrite, r.COutput, r.CTotal, r.PricingStatus, r.RateCardID, r.TierAbove, r.CatalogRef)
+	if err != nil {
+		return fmt.Errorf("insert request: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil
+	}
+	client := ""
+	if r.Client != nil {
+		client = *r.Client
+	}
+	var unpriced int64
+	cost := 0.0
+	if r.CTotal == nil {
+		unpriced = 1
+	} else {
+		cost = *r.CTotal
+	}
+	if _, err := upRollup.ExecContext(ctx, dayUTC(r.RequestedAtMS), r.Model, r.Provider, r.Credential, client,
+		boolInt(r.Failed), unpriced, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, cost); err != nil {
+		return fmt.Errorf("upsert rollup: %w", err)
+	}
+	return nil
+}
+
+func writeItemMetadata(ctx context.Context, tx *sql.Tx, it Item) error {
+	if q := it.Quota; q != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO quota_snapshots (credential, auth_id, provider, observed_at_ms, snapshot_json)
+VALUES (?,?,?,?,?) ON CONFLICT(credential) DO UPDATE SET auth_id=excluded.auth_id, provider=excluded.provider,
+observed_at_ms=excluded.observed_at_ms, snapshot_json=excluded.snapshot_json WHERE excluded.observed_at_ms >= quota_snapshots.observed_at_ms`,
+			q.Credential, nullStr(q.AuthID), q.Provider, q.ObservedAtMS, string(q.SnapshotJSON)); err != nil {
+			return fmt.Errorf("upsert quota: %w", err)
+		}
+	}
+	if c := it.Card; c != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO rate_cards (id, catalog_ref, card_json, feed_etag, first_seen_ms) VALUES (?,?,?,?,?)`,
+			c.ID, c.CatalogRef, string(c.JSON), nullStr(c.FeedETag), nowMS()); err != nil {
+			return fmt.Errorf("insert rate card: %w", err)
+		}
+	}
+	if l := it.Learned; l != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO learned_models (model, catalog_provider, updated_ms) VALUES (?,?,?)
+ON CONFLICT(model) DO UPDATE SET catalog_provider=excluded.catalog_provider, updated_ms=excluded.updated_ms`,
+			l.Model, l.Provider, nowMS()); err != nil {
+			return fmt.Errorf("upsert learned: %w", err)
+		}
+	}
+	return nil
 }
 
 func nullStr(s string) any {

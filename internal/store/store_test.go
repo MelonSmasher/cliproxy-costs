@@ -307,6 +307,13 @@ func TestRollupOverflowOnlyDropsOffendingRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(time.Second)
+	enqueueOverflowBatch(t, s)
+	assertIsolatedBatchReported(t, reported, 2)
+	assertOverflowBatchState(t, s)
+}
+
+func enqueueOverflowBatch(t *testing.T, s *Store) {
+	t.Helper()
 	huge := row("huge", 1, nil)
 	huge.TInput, huge.TOutput = math.MaxInt64, 0
 	overflowing := row("overflow", 2, nil)
@@ -325,21 +332,38 @@ func TestRollupOverflowOnlyDropsOffendingRows(t *testing.T) {
 			t.Fatal("unexpected enqueue failure")
 		}
 	}
+}
+
+func assertIsolatedBatchReported(t *testing.T, reported <-chan error, dropped int64) {
+	t.Helper()
 	select {
 	case err := <-reported:
 		var isolated *isolatedBatchError
-		if !errors.As(err, &isolated) || isolated.droppedRows != 2 {
+		if !errors.As(err, &isolated) || isolated.droppedRows != dropped {
 			t.Fatalf("incorrect isolation result: %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("overflow was not reported")
 	}
+}
+
+func assertOverflowBatchState(t *testing.T, s *Store) {
+	t.Helper()
 	if n := count(t, s); n != 2 {
 		t.Fatalf("unrelated rows lost: %d persisted", n)
 	}
 	if s.Dropped() != 2 || s.LastWriteError() == "" || s.writeErrs.Load() != 1 {
 		t.Fatalf("bad accounting: dropped=%d errors=%d health=%q", s.Dropped(), s.writeErrs.Load(), s.LastWriteError())
 	}
+	assertOverflowRollups(t, s)
+	qs, err := s.Quotas(context.Background())
+	if err != nil || len(qs) != 0 {
+		t.Fatalf("rejected item metadata was not rolled back: %+v, %v", qs, err)
+	}
+}
+
+func assertOverflowRollups(t *testing.T, s *Store) {
+	t.Helper()
 	for model, want := range map[string]int64{"m": math.MaxInt64, "other": 7} {
 		var tokens, requests int64
 		if err := s.r.QueryRow(`SELECT t_input, requests FROM daily_rollups WHERE model=?`, model).Scan(&tokens, &requests); err != nil {
@@ -348,10 +372,6 @@ func TestRollupOverflowOnlyDropsOffendingRows(t *testing.T) {
 		if tokens != want || requests != 1 {
 			t.Fatalf("fabricated rollup for %s: tokens=%d requests=%d", model, tokens, requests)
 		}
-	}
-	qs, err := s.Quotas(context.Background())
-	if err != nil || len(qs) != 0 {
-		t.Fatalf("rejected item metadata was not rolled back: %+v, %v", qs, err)
 	}
 }
 

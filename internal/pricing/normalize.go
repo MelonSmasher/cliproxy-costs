@@ -59,15 +59,10 @@ func nonNeg(v int64) int64 {
 // ValidDetail rejects impossible counters before normalization can hide an
 // overlap or overflow. A total-token mismatch alone is diagnostic, not invalid.
 func ValidDetail(family string, d Detail) bool {
-	for _, n := range []int64{d.InputTokens, d.OutputTokens, d.ReasoningTokens, d.CachedTokens, d.CacheReadTokens, d.CacheCreationTokens, d.TotalTokens} {
-		if n < 0 {
-			return false
-		}
+	if !nonnegativeDetail(d) {
+		return false
 	}
-	cr := d.CacheReadTokens
-	if cr == 0 && (family != config.FamilyAnthropic || d.CacheCreationTokens == 0) {
-		cr = d.CachedTokens
-	}
+	cr := detailCacheRead(family, d)
 	switch family {
 	case config.FamilyAnthropic:
 		return sumFits(d.InputTokens, cr, d.CacheCreationTokens, d.OutputTokens) && d.ReasoningTokens <= d.OutputTokens
@@ -77,6 +72,22 @@ func ValidDetail(family string, d Detail) bool {
 		return cr <= d.InputTokens && d.CacheCreationTokens <= d.InputTokens-cr &&
 			d.ReasoningTokens <= d.OutputTokens && sumFits(d.InputTokens, d.OutputTokens)
 	}
+}
+
+func nonnegativeDetail(d Detail) bool {
+	for _, n := range []int64{d.InputTokens, d.OutputTokens, d.ReasoningTokens, d.CachedTokens, d.CacheReadTokens, d.CacheCreationTokens, d.TotalTokens} {
+		if n < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func detailCacheRead(family string, d Detail) int64 {
+	if d.CacheReadTokens == 0 && (family != config.FamilyAnthropic || d.CacheCreationTokens == 0) {
+		return d.CachedTokens
+	}
+	return d.CacheReadTokens
 }
 
 func sumFits(values ...int64) bool {

@@ -12,16 +12,83 @@ type streamTestHost func(string, []byte) ([]byte, error)
 
 func (h streamTestHost) Call(method string, req []byte) ([]byte, error) { return h(method, req) }
 
+type streamLimitCase struct {
+	name       string
+	limit      int64
+	status     int
+	chunkError string
+	wantBody   string
+	wantError  string
+	wantReads  int
+}
+
+type streamLimitFixture struct {
+	t                      *testing.T
+	tc                     streamLimitCase
+	reads, closes, cancels int
+}
+
+func (h *streamLimitFixture) Call(method string, req []byte) ([]byte, error) {
+	switch method {
+	case "host.http.operation_open":
+		return OK(map[string]string{"operation_id": "op1"}), nil
+	case "host.http.do_stream":
+		if !strings.Contains(string(req), `"operation_id":"op1"`) {
+			h.t.Errorf("missing operation ID: %s", req)
+		}
+		return OK(map[string]any{"status_code": h.tc.status, "headers": map[string][]string{"Etag": {"v1"}}, "stream_id": "s1"}), nil
+	case "host.http.stream_read":
+		return h.read(req), nil
+	case "host.http.stream_close":
+		h.checkStreamRequest(req)
+		h.closes++
+		return OK(nil), nil
+	case "host.http.cancel":
+		h.cancels++
+		return OK(nil), nil
+	default:
+		h.t.Errorf("unexpected callback %s (must not use buffered HTTP)", method)
+		return nil, errors.New("unexpected callback")
+	}
+}
+
+func (h *streamLimitFixture) checkStreamRequest(req []byte) {
+	h.t.Helper()
+	if string(req) != `{"stream_id":"s1"}` {
+		h.t.Errorf("invalid stream request: %s", req)
+	}
+}
+
+func (h *streamLimitFixture) read(req []byte) []byte {
+	h.checkStreamRequest(req)
+	h.reads++
+	body := "ab"
+	if h.reads == 2 {
+		body = "cd"
+	}
+	return OK(map[string]any{"payload": []byte(body), "done": h.reads == 2, "error": h.tc.chunkError})
+}
+
+func (h *streamLimitFixture) checkCleanup() {
+	h.t.Helper()
+	if h.reads != h.tc.wantReads || h.closes != 1 || h.cancels != 1 {
+		h.t.Fatalf("reads=%d closes=%d cancels=%d", h.reads, h.closes, h.cancels)
+	}
+}
+
+func checkStreamLimitResponse(t *testing.T, tc streamLimitCase, resp HostHTTPResponse, err error) {
+	t.Helper()
+	if tc.wantError == "" {
+		if err != nil || resp.StatusCode != tc.status || string(resp.Body) != tc.wantBody || resp.Headers.Get("Etag") != "v1" {
+			t.Fatalf("response=%+v error=%v", resp, err)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), tc.wantError) || len(resp.Body) != 0 {
+		t.Fatalf("response=%+v error=%v, want %q", resp, err, tc.wantError)
+	}
+}
+
 func TestHTTPStreamEnforcesTransferLimitAndCleansUp(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		limit      int64
-		status     int
-		chunkError string
-		wantBody   string
-		wantError  string
-		wantReads  int
-	}{
+	for _, tc := range []streamLimitCase{
 		{"exact limit", 4, 200, "", "abcd", "", 2},
 		{"over limit", 3, 200, "", "", "response exceeds 3 bytes", 2},
 		{"first chunk too large", 1, 200, "", "", "response exceeds 1 bytes", 1},
@@ -30,51 +97,11 @@ func TestHTTPStreamEnforcesTransferLimitAndCleansUp(t *testing.T) {
 		{"error page", 4, 503, "", "", "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reads, closes, cancels := 0, 0, 0
-			c := NewHTTPClient(streamTestHost(func(method string, req []byte) ([]byte, error) {
-				switch method {
-				case "host.http.operation_open":
-					return OK(map[string]string{"operation_id": "op1"}), nil
-				case "host.http.do_stream":
-					if !strings.Contains(string(req), `"operation_id":"op1"`) {
-						t.Errorf("missing operation ID: %s", req)
-					}
-					return OK(map[string]any{"status_code": tc.status, "headers": map[string][]string{"Etag": {"v1"}}, "stream_id": "s1"}), nil
-				case "host.http.stream_read":
-					if string(req) != `{"stream_id":"s1"}` {
-						t.Errorf("invalid stream read: %s", req)
-					}
-					reads++
-					body := "ab"
-					if reads == 2 {
-						body = "cd"
-					}
-					return OK(map[string]any{"payload": []byte(body), "done": reads == 2, "error": tc.chunkError}), nil
-				case "host.http.stream_close":
-					if string(req) != `{"stream_id":"s1"}` {
-						t.Errorf("invalid stream close: %s", req)
-					}
-					closes++
-					return OK(nil), nil
-				case "host.http.cancel":
-					cancels++
-					return OK(nil), nil
-				default:
-					t.Errorf("unexpected callback %s (must not use buffered HTTP)", method)
-					return nil, errors.New("unexpected callback")
-				}
-			}))
+			h := &streamLimitFixture{t: t, tc: tc}
+			c := NewHTTPClient(h)
 			resp, err := c.Do(context.Background(), HostHTTPRequest{Method: "GET", URL: "https://example.invalid/feed"}, tc.limit)
-			if tc.wantError == "" {
-				if err != nil || resp.StatusCode != tc.status || string(resp.Body) != tc.wantBody || resp.Headers.Get("Etag") != "v1" {
-					t.Fatalf("response=%+v error=%v", resp, err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) || len(resp.Body) != 0 {
-				t.Fatalf("response=%+v error=%v, want %q", resp, err, tc.wantError)
-			}
-			if reads != tc.wantReads || closes != 1 || cancels != 1 {
-				t.Fatalf("reads=%d closes=%d cancels=%d", reads, closes, cancels)
-			}
+			checkStreamLimitResponse(t, tc, resp, err)
+			h.checkCleanup()
 		})
 	}
 }

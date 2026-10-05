@@ -12,8 +12,9 @@ typedef struct { uint32_t abi_version; int (*call)(char *, uint8_t *, size_t, bu
 typedef int (*init_fn)(host_api *, plugin_api *);
 static int fake_call(void *ctx, const char *method, const uint8_t *req, size_t size, buffer *out) {
  (void)ctx; (void)method; (void)req; (void)size;
- const char *value = "{\"ok\":true,\"result\":{}}";
- out->len = strlen(value); out->ptr = malloc(out->len);
+ static const char value[] = "{\"ok\":true,\"result\":{}}";
+ out->len = sizeof(value) - 1; out->ptr = malloc(out->len);
+ if (out->ptr == NULL) { out->len = 0; return 1; }
  memcpy(out->ptr, value, out->len); return 0;
 }
 static void release(void *ptr, size_t len) { (void)len; free(ptr); }
@@ -24,6 +25,8 @@ int main(int argc, char **argv) {
  if (!lib) { fprintf(stderr, "%s\n", dlerror()); return 1; }
  init_fn init = (init_fn)dlsym(lib, "cliproxy_plugin_init"); CHECK(init != NULL);
  host_api host = {1, NULL, fake_call, release}; plugin_api api = {0};
+ // This synthetic host deliberately has no opaque callback context.
+ CHECK(host.ctx == NULL);
  CHECK(init(NULL, &api) != 0); CHECK(init(&host, NULL) != 0);
  host.abi_version = 2; CHECK(init(&host, &api) != 0); host.abi_version = 1;
  host.call = NULL; CHECK(init(&host, &api) != 0); host.call = fake_call;

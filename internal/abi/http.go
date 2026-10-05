@@ -67,91 +67,121 @@ func (c *HTTPClient) Do(ctx context.Context, req HostHTTPRequest, maxBytes int64
 }
 
 func (c *HTTPClient) perform(ctx context.Context, req HostHTTPRequest, maxBytes int64) (HostHTTPResponse, error) {
-	if !c.legacyOperation {
-		id, unsupported, err := c.openOperation()
-		if err != nil {
-			return HostHTTPResponse{}, err
-		}
-		c.legacyOperation = unsupported
-		if !unsupported {
-			req.OperationID = id
-			// Keep the slot until both Do and Cancel return. A faulty cancel
-			// callback must not become another unbounded source of goroutines.
-			var once sync.Once
-			cancel := func() {
-				once.Do(func() {
-					_ = CallResult(c.host, MethodHostHTTPCancel, struct {
-						OperationID string `json:"operation_id"`
-					}{id}, nil)
-				})
-			}
-			stop := context.AfterFunc(ctx, cancel)
-			defer func() {
-				stop()
-				// Cancel is idempotent; this also releases an operation if the
-				// request never reached the host (for example after cancellation).
-				cancel()
-			}()
-		}
+	cleanup, err := c.prepareOperation(ctx, &req)
+	if err != nil {
+		return HostHTTPResponse{}, err
 	}
+	defer cleanup()
 	if err := ctx.Err(); err != nil {
 		return HostHTTPResponse{}, err
 	}
 	if !c.legacyStream {
-		var stream struct {
-			StatusCode int         `json:"status_code"`
-			Headers    http.Header `json:"headers"`
-			StreamID   string      `json:"stream_id"`
-		}
-		unsupported, err := c.callOptional(MethodHostHTTPDoStream, req, &stream)
-		if err != nil {
-			return HostHTTPResponse{}, err
-		}
-		c.legacyStream = unsupported
-		if !unsupported {
-			if strings.TrimSpace(stream.StreamID) == "" {
-				return HostHTTPResponse{}, errors.New("host HTTP stream returned an empty ID")
-			}
-			streamRequest := struct {
-				StreamID string `json:"stream_id"`
-			}{stream.StreamID}
-			var once sync.Once
-			closeStream := func() {
-				once.Do(func() { _ = CallResult(c.host, MethodHostHTTPStreamClose, streamRequest, nil) })
-			}
-			stop := context.AfterFunc(ctx, closeStream)
-			defer func() { stop(); closeStream() }()
-			resp := HostHTTPResponse{StatusCode: stream.StatusCode, Headers: stream.Headers}
-			// Feed consumers need bodies only for HTTP 200. Do not download
-			// arbitrary error pages or bodies attached to conditional replies.
-			if resp.StatusCode != http.StatusOK {
-				return resp, nil
-			}
-			for {
-				if err := ctx.Err(); err != nil {
-					return HostHTTPResponse{}, err
-				}
-				var chunk struct {
-					Payload []byte `json:"payload"`
-					Error   string `json:"error"`
-					Done    bool   `json:"done"`
-				}
-				if err := CallResult(c.host, MethodHostHTTPStreamRead, streamRequest, &chunk); err != nil {
-					return HostHTTPResponse{}, err
-				}
-				if chunk.Error != "" {
-					return HostHTTPResponse{}, fmt.Errorf("host HTTP stream: %s", chunk.Error)
-				}
-				if int64(len(chunk.Payload)) > maxBytes-int64(len(resp.Body)) {
-					return HostHTTPResponse{}, fmt.Errorf("host HTTP response exceeds %d bytes", maxBytes)
-				}
-				resp.Body = append(resp.Body, chunk.Payload...)
-				if chunk.Done {
-					return resp, nil
-				}
-			}
+		resp, unsupported, err := c.performStream(ctx, req, maxBytes)
+		if err != nil || !unsupported {
+			return resp, err
 		}
 	}
+	return c.performBuffered(ctx, req, maxBytes)
+}
+
+func (c *HTTPClient) prepareOperation(ctx context.Context, req *HostHTTPRequest) (func(), error) {
+	if c.legacyOperation {
+		return func() {}, nil
+	}
+	id, unsupported, err := c.openOperation()
+	if err != nil {
+		return nil, err
+	}
+	c.legacyOperation = unsupported
+	if unsupported {
+		return func() {}, nil
+	}
+	req.OperationID = id
+	request := struct {
+		OperationID string `json:"operation_id"`
+	}{id}
+	return c.cleanupOnCancel(ctx, MethodHostHTTPCancel, request), nil
+}
+
+// cleanupOnCancel runs cleanup at cancellation or completion, exactly once.
+// The caller must defer the returned function so the slot remains occupied
+// until even a blocked cleanup callback returns. Operation cancellation also
+// releases an operation whose request never reached the host.
+func (c *HTTPClient) cleanupOnCancel(ctx context.Context, method string, request any) func() {
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() { _ = CallResult(c.host, method, request, nil) })
+	}
+	stop := context.AfterFunc(ctx, cleanup)
+	return func() { stop(); cleanup() }
+}
+
+type hostHTTPStreamRequest struct {
+	StreamID string `json:"stream_id"`
+}
+
+func (c *HTTPClient) performStream(ctx context.Context, req HostHTTPRequest, maxBytes int64) (HostHTTPResponse, bool, error) {
+	var stream struct {
+		StatusCode int         `json:"status_code"`
+		Headers    http.Header `json:"headers"`
+		StreamID   string      `json:"stream_id"`
+	}
+	unsupported, err := c.callOptional(MethodHostHTTPDoStream, req, &stream)
+	if err != nil {
+		return HostHTTPResponse{}, false, err
+	}
+	c.legacyStream = unsupported
+	if unsupported {
+		return HostHTTPResponse{}, true, nil
+	}
+	if strings.TrimSpace(stream.StreamID) == "" {
+		return HostHTTPResponse{}, false, errors.New("host HTTP stream returned an empty ID")
+	}
+	streamRequest := hostHTTPStreamRequest{StreamID: stream.StreamID}
+	cleanup := c.cleanupOnCancel(ctx, MethodHostHTTPStreamClose, streamRequest)
+	defer cleanup()
+	resp := HostHTTPResponse{StatusCode: stream.StatusCode, Headers: stream.Headers}
+	// Feed consumers need bodies only for HTTP 200. Do not download arbitrary
+	// error pages or bodies attached to conditional replies.
+	if resp.StatusCode != http.StatusOK {
+		return resp, false, nil
+	}
+	body, err := c.readStream(ctx, streamRequest, maxBytes)
+	if err != nil {
+		return HostHTTPResponse{}, false, err
+	}
+	resp.Body = body
+	return resp, false, nil
+}
+
+func (c *HTTPClient) readStream(ctx context.Context, req hostHTTPStreamRequest, maxBytes int64) ([]byte, error) {
+	var body []byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var chunk struct {
+			Payload []byte `json:"payload"`
+			Error   string `json:"error"`
+			Done    bool   `json:"done"`
+		}
+		if err := CallResult(c.host, MethodHostHTTPStreamRead, req, &chunk); err != nil {
+			return nil, err
+		}
+		if chunk.Error != "" {
+			return nil, fmt.Errorf("host HTTP stream: %s", chunk.Error)
+		}
+		if int64(len(chunk.Payload)) > maxBytes-int64(len(body)) {
+			return nil, fmt.Errorf("host HTTP response exceeds %d bytes", maxBytes)
+		}
+		body = append(body, chunk.Payload...)
+		if chunk.Done {
+			return body, nil
+		}
+	}
+}
+
+func (c *HTTPClient) performBuffered(ctx context.Context, req HostHTTPRequest, maxBytes int64) (HostHTTPResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return HostHTTPResponse{}, err
 	}
@@ -196,23 +226,27 @@ func (c *HTTPClient) callOptional(method string, request, out any) (unsupported 
 		return false, fmt.Errorf("%s: decode envelope: %w", method, err)
 	}
 	if !env.OK {
-		if env.Error != nil {
-			switch env.Error.Code {
-			case "unknown_method", "method_not_found", "unsupported_method":
-				return true, nil
-			case "host_call_failed":
-				// CPA's older native bridge uses this generic code. Only its
-				// exact unknown-callback message authorizes a legacy fallback.
-				if env.Error.Message == "unsupported host callback "+method {
-					return true, nil
-				}
-			}
-			return false, fmt.Errorf("%s: %s: %s", method, env.Error.Code, env.Error.Message)
-		}
-		return false, fmt.Errorf("%s: failed", method)
+		return optionalMethodError(method, env.Error)
 	}
 	if err := json.Unmarshal(env.Result, out); err != nil {
 		return false, fmt.Errorf("%s: decode result: %w", method, err)
 	}
 	return false, nil
+}
+
+func optionalMethodError(method string, err *Error) (unsupported bool, callErr error) {
+	if err == nil {
+		return false, fmt.Errorf("%s: failed", method)
+	}
+	switch err.Code {
+	case "unknown_method", "method_not_found", "unsupported_method":
+		return true, nil
+	case "host_call_failed":
+		// CPA's older native bridge uses this generic code. Only its exact
+		// unknown-callback message authorizes a legacy fallback.
+		if err.Message == "unsupported host callback "+method {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("%s: %s: %s", method, err.Code, err.Message)
 }

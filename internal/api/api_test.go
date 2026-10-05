@@ -482,11 +482,17 @@ func TestLargeFiniteSummaryAmountsRemainRepresentable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestNonFiniteSummaryAmountsRemainUnknown(t *testing.T) {
 	for _, value := range []float64{math.Inf(1), math.Inf(-1), math.NaN()} {
 		if got := round9(value); got != nil {
 			t.Fatalf("unrepresentable amount %g returned %v", value, got)
 		}
 	}
+}
+
+func TestOverflowedSummaryCostRemainsUnknown(t *testing.T) {
 	a := acc{requests: 2, cost: math.MaxFloat64}
 	a.add(store.Agg{Requests: 1, Cost: math.MaxFloat64})
 	if a.costPtr() != nil {
