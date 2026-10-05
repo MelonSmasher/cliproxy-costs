@@ -50,11 +50,13 @@ func runChatCases(t *testing.T, h *nativeHost) []expectation {
 	cases := []modelCase{{"priced-fixture", "override", ptr(0.00264)}, {"catalog-fixture", "ok", ptr(0.00528)}, {"unknown-fixture", "unknown", nil}}
 	for _, tc := range cases {
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("chat_%s_stream_%t", tc.model, stream), func(t *testing.T) {
+			if !t.Run(fmt.Sprintf("chat_%s_stream_%t", tc.model, stream), func(t *testing.T) {
 				r := h.request(t, "POST", "/v1/chat/completions", clientKey, map[string]any{"model": tc.model, "stream": stream, "stream_options": map[string]bool{"include_usage": true}, "messages": []any{map[string]string{"role": "user", "content": "Synthetic usage only"}}})
 				assertCostResponse(t, r, "chat", stream, tc.status, tc.cost)
 				expected = append(expected, expectation{responseTrace(t, r), tc.model, tc.status, stream, tc.cost})
-			})
+			}) {
+				t.FailNow()
+			}
 		}
 	}
 	return expected
@@ -66,7 +68,7 @@ func runTranslatedCases(t *testing.T, h *nativeHost) []expectation {
 	var expected []expectation
 	for _, format := range []string{"responses", "messages"} {
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("translated_%s_stream_%t", format, stream), func(t *testing.T) {
+			if !t.Run(fmt.Sprintf("translated_%s_stream_%t", format, stream), func(t *testing.T) {
 				body := map[string]any{"model": "priced-fixture", "stream": stream, "max_tokens": 100, "messages": []any{map[string]string{"role": "user", "content": "Synthetic usage only"}}}
 				if format == "responses" {
 					delete(body, "messages")
@@ -75,7 +77,9 @@ func runTranslatedCases(t *testing.T, h *nativeHost) []expectation {
 				r := h.request(t, "POST", "/v1/"+format, clientKey, body)
 				assertCostResponse(t, r, format, stream, "override", ptr(0.00264))
 				expected = append(expected, expectation{responseTrace(t, r), "priced-fixture", "override", stream, ptr(0.00264)})
-			})
+			}) {
+				t.FailNow()
+			}
 		}
 	}
 	return expected
