@@ -31,6 +31,9 @@ func Stream(format string, chunk []byte, start *MessagesUsage, price Pricer) Str
 	}
 	frames := ParseFrames(chunk)
 	for _, f := range frames {
+		if bytes.Equal(bytes.TrimSpace(f.Data), []byte("[DONE]")) {
+			return StreamResult{Done: true}
+		}
 		if len(f.Data) == 0 || f.Data[0] != '{' {
 			continue
 		}
@@ -57,6 +60,9 @@ func streamDoc(format string, doc []byte, event string, start *MessagesUsage, pr
 	typ := event
 	if typ == "" {
 		typ = gjson.GetBytes(doc, "type").String()
+	}
+	if typ == "message_stop" || typ == "response.failed" || typ == "error" {
+		return StreamResult{Done: true}
 	}
 	var (
 		path string
@@ -94,7 +100,19 @@ func streamDoc(format string, doc []byte, event string, start *MessagesUsage, pr
 				s = *start
 			}
 			path = "usage"
-			b, ok = ReadMessagesUsage(u).Merge(s).Buckets()
+			delta := ReadMessagesUsage(u)
+			// An empty delta has no final counters; do not turn message_start's
+			// provisional usage into a completed estimate.
+			if !delta.present || delta.invalid {
+				return StreamResult{}
+			}
+			merged := delta.Merge(s)
+			// A missing or dropped message_start must not make an absent
+			// input counter look like an explicitly reported zero.
+			if merged.fields&1 == 0 {
+				return StreamResult{}
+			}
+			b, ok = merged.Buckets()
 		default:
 			return StreamResult{}
 		}

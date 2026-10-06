@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -148,4 +149,68 @@ func TestHeaderlessRecordYieldsNoSnapshot(t *testing.T) {
 	if _, ok := parse(t, h); ok {
 		t.Fatal("record without windows must not replace a snapshot")
 	}
+}
+
+func TestQuotaNumericOverflowIsRejected(t *testing.T) {
+	for name, field := range map[string]struct{ key, value string }{
+		"infinite reset":         {"reset-after-seconds", "+Inf"},
+		"nan reset":              {"reset-after-seconds", "NaN"},
+		"huge reset":             {"reset-after-seconds", "1e300"},
+		"integer reset overflow": {"reset-at", "9223372036854775807"},
+		"duration overflow":      {"window-minutes", "9223372036854775807"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := map[string]string{"x-codex-primary-used-percent": "1", "x-codex-primary-window-minutes": "300"}
+			if field.key == "window-minutes" {
+				h["x-codex-primary-reset-at"] = "1790050000"
+			}
+			h["x-codex-primary-"+field.key] = field.value
+			if s, _, ok := Parse(h, observed); ok {
+				t.Fatalf("invalid quota accepted: %+v", s)
+			}
+		})
+	}
+	for _, w := range []string{"9223372036854775807m", "9223372036854775807h", "9223372036854775807d"} {
+		if s, _, ok := Parse(map[string]string{"anthropic-ratelimit-unified-" + w + "-utilization": "0.5"}, observed); ok {
+			t.Fatalf("overflowing window: %+v", s)
+		}
+	}
+	if s, _, ok := Parse(map[string]string{"anthropic-ratelimit-unified-5h-utilization": "1e308"}, observed); ok {
+		t.Fatalf("unserializable quota: %+v", s)
+	}
+	for _, raw := range []string{"+Inf", "NaN", "1e300"} {
+		s, _, ok := Parse(map[string]string{"anthropic-ratelimit-unified-5h-utilization": "0.5", "retry-after": raw}, observed)
+		if !ok || s.RetryAfterMS != 0 {
+			t.Fatalf("invalid retry-after %s: %+v", raw, s)
+		}
+	}
+}
+
+func FuzzQuotaNumbers(f *testing.F) {
+	for _, v := range []string{"0", "1", "50.5", "300", "NaN", "+Inf", "1e308", "9223372036854775807"} {
+		f.Add(v)
+	}
+	f.Fuzz(func(t *testing.T, v string) {
+		for _, h := range []map[string]string{
+			{"x-codex-primary-used-percent": "1", "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-after-seconds": v, "retry-after": v},
+			{"x-codex-primary-used-percent": "1", "x-codex-primary-window-minutes": v, "x-codex-primary-reset-at": v},
+			{"anthropic-ratelimit-unified-5h-utilization": v, "anthropic-ratelimit-unified-5h-reset": v},
+		} {
+			s, _, ok := Parse(h, observed)
+			if !ok {
+				continue
+			}
+			if _, err := json.Marshal(s); err != nil {
+				t.Fatalf("unserializable quota: %+v: %v", s, err)
+			}
+			if s.RetryAfterMS < 0 {
+				t.Fatalf("negative retry-after: %+v", s)
+			}
+			for _, w := range s.Windows {
+				if w.DurationMS <= 0 || w.ResetsAtMS < 0 || w.UsedPercent < 0 || w.UsedFraction < 0 {
+					t.Fatalf("invalid window: %+v", w)
+				}
+			}
+		}
+	})
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Row is one ledger row (one execution attempt).
@@ -122,12 +124,18 @@ func dsn(path string, readOnly bool) string {
 	} else {
 		q = append(q, "_pragma=journal_mode(WAL)", "_pragma=synchronous(NORMAL)", "_txlock=immediate")
 	}
-	return "file:" + path + "?" + strings.Join(q, "&")
+	// Escape literal percent sequences as well as spaces. Concatenating a
+	// filesystem path into a URI can silently open a different database.
+	uri := url.URL{Path: filepath.ToSlash(path)}
+	return "file:" + uri.EscapedPath() + "?" + strings.Join(q, "&")
 }
 
 // Open creates (0700 dir, 0600 file) and migrates the database, then starts
 // the writer goroutine. onFlushErr (may be nil) is told about failed batches.
 func Open(ctx context.Context, path string, opts Options, onFlushErr func(error)) (*Store, error) {
+	if opts.Capacity <= 0 || opts.BatchSize <= 0 || opts.Flush <= 0 {
+		return nil, errors.New("store: capacity, batch size and flush interval must be positive")
+	}
 	if strings.ContainsAny(path, "?#") {
 		return nil, errors.New("store: db-path must not contain '?' or '#'")
 	}
@@ -274,10 +282,11 @@ func (s *Store) writer() {
 		if err := s.writeBatch(batch); err != nil {
 			s.writeErrs.Add(1)
 			s.lastErr.Store(err.Error())
-			for _, it := range batch {
-				if it.Row != nil {
-					s.dropped.Add(1)
-				}
+			var isolated *isolatedBatchError
+			if errors.As(err, &isolated) {
+				s.dropped.Add(isolated.droppedRows)
+			} else {
+				s.dropped.Add(rowCount(batch))
 			}
 			if s.onFlushErr != nil {
 				s.onFlushErr(err)
@@ -325,6 +334,64 @@ func boolInt(b bool) int64 {
 func (s *Store) writeBatch(batch []Item) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	err := s.writeBatchContext(ctx, batch)
+	if err == nil || len(batch) <= 1 || !rowDataConstraint(err) {
+		return err
+	}
+	// STRICT integer overflow is deterministic row data, not a database
+	// outage. The failed transaction has rolled back completely. Retry each
+	// item once so one overflowing rollup cannot discard unrelated requests.
+	// All attempts share the original deadline; never retry other DB errors.
+	var firstErr error
+	var dropped int64
+	for i, item := range batch {
+		if err := s.writeBatchContext(ctx, []Item{item}); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if !rowDataConstraint(err) {
+				dropped += rowCount(batch[i:])
+				return &isolatedBatchError{cause: err, droppedRows: dropped}
+			}
+			if item.Row != nil {
+				dropped++
+			}
+		}
+	}
+	if firstErr != nil {
+		return &isolatedBatchError{cause: firstErr, droppedRows: dropped}
+	}
+	return nil
+}
+
+// isolatedBatchError reports a partially successful replay. Its rejected-row
+// count prevents the writer from counting successfully committed siblings as
+// dropped. A whole Item (request, rollup and metadata) remains atomic.
+type isolatedBatchError struct {
+	cause       error
+	droppedRows int64
+}
+
+func (e *isolatedBatchError) Error() string {
+	return fmt.Sprintf("isolated batch: %d rows dropped: %v", e.droppedRows, e.cause)
+}
+func (e *isolatedBatchError) Unwrap() error { return e.cause }
+
+func rowCount(batch []Item) (n int64) {
+	for _, item := range batch {
+		if item.Row != nil {
+			n++
+		}
+	}
+	return n
+}
+
+func rowDataConstraint(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_DATATYPE
+}
+
+func (s *Store) writeBatchContext(ctx context.Context, batch []Item) error {
 	tx, err := s.w.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -353,57 +420,73 @@ t_reasoning=t_reasoning+excluded.t_reasoning, c_total=c_total+excluded.c_total`)
 	}
 	defer upRollup.Close()
 	for _, it := range batch {
-		if r := it.Row; r != nil {
-			res, err := insRow.ExecContext(ctx,
-				r.RequestID, r.TraceID, r.RequestedAtMS, r.Provider, nullStr(r.ExecutorType), r.Model, nullStr(r.Alias), nullStr(r.ResponseModel),
-				nullStr(r.AuthID), nullStr(r.Credential), nullStr(r.AuthType), r.Client, nullStr(r.SessionID),
-				boolInt(r.Stream), boolInt(r.Generate), boolInt(r.Failed), r.FailureStatus,
-				r.LatencyMS, r.TTFTMS, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, boolInt(r.TokenMismatch),
-				r.CInput, r.CCacheRead, r.CCacheWrite, r.COutput, r.CTotal, r.PricingStatus, r.RateCardID, r.TierAbove, r.CatalogRef)
-			if err != nil {
-				return fmt.Errorf("insert request: %w", err)
-			}
-			if n, _ := res.RowsAffected(); n == 1 {
-				client := ""
-				if r.Client != nil {
-					client = *r.Client
-				}
-				var unpriced int64
-				cost := 0.0
-				if r.CTotal == nil {
-					unpriced = 1
-				} else {
-					cost = *r.CTotal
-				}
-				if _, err := upRollup.ExecContext(ctx, dayUTC(r.RequestedAtMS), r.Model, r.Provider, r.Credential, client,
-					boolInt(r.Failed), unpriced, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, cost); err != nil {
-					return fmt.Errorf("upsert rollup: %w", err)
-				}
-			}
+		if err := writeRequest(ctx, insRow, upRollup, it.Row); err != nil {
+			return err
 		}
-		if q := it.Quota; q != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO quota_snapshots (credential, auth_id, provider, observed_at_ms, snapshot_json)
-VALUES (?,?,?,?,?) ON CONFLICT(credential) DO UPDATE SET auth_id=excluded.auth_id, provider=excluded.provider,
-observed_at_ms=excluded.observed_at_ms, snapshot_json=excluded.snapshot_json WHERE excluded.observed_at_ms >= quota_snapshots.observed_at_ms`,
-				q.Credential, nullStr(q.AuthID), q.Provider, q.ObservedAtMS, string(q.SnapshotJSON)); err != nil {
-				return fmt.Errorf("upsert quota: %w", err)
-			}
-		}
-		if c := it.Card; c != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO rate_cards (id, catalog_ref, card_json, feed_etag, first_seen_ms) VALUES (?,?,?,?,?)`,
-				c.ID, c.CatalogRef, string(c.JSON), nullStr(c.FeedETag), nowMS()); err != nil {
-				return fmt.Errorf("insert rate card: %w", err)
-			}
-		}
-		if l := it.Learned; l != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO learned_models (model, catalog_provider, updated_ms) VALUES (?,?,?)
-ON CONFLICT(model) DO UPDATE SET catalog_provider=excluded.catalog_provider, updated_ms=excluded.updated_ms`,
-				l.Model, l.Provider, nowMS()); err != nil {
-				return fmt.Errorf("upsert learned: %w", err)
-			}
+		if err := writeItemMetadata(ctx, tx, it); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()
+}
+
+func writeRequest(ctx context.Context, insRow, upRollup *sql.Stmt, r *Row) error {
+	if r == nil {
+		return nil
+	}
+	res, err := insRow.ExecContext(ctx,
+		r.RequestID, r.TraceID, r.RequestedAtMS, r.Provider, nullStr(r.ExecutorType), r.Model, nullStr(r.Alias), nullStr(r.ResponseModel),
+		nullStr(r.AuthID), nullStr(r.Credential), nullStr(r.AuthType), r.Client, nullStr(r.SessionID),
+		boolInt(r.Stream), boolInt(r.Generate), boolInt(r.Failed), r.FailureStatus,
+		r.LatencyMS, r.TTFTMS, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, boolInt(r.TokenMismatch),
+		r.CInput, r.CCacheRead, r.CCacheWrite, r.COutput, r.CTotal, r.PricingStatus, r.RateCardID, r.TierAbove, r.CatalogRef)
+	if err != nil {
+		return fmt.Errorf("insert request: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil
+	}
+	client := ""
+	if r.Client != nil {
+		client = *r.Client
+	}
+	var unpriced int64
+	cost := 0.0
+	if r.CTotal == nil {
+		unpriced = 1
+	} else {
+		cost = *r.CTotal
+	}
+	if _, err := upRollup.ExecContext(ctx, dayUTC(r.RequestedAtMS), r.Model, r.Provider, r.Credential, client,
+		boolInt(r.Failed), unpriced, r.TInput, r.TCacheRead, r.TCacheWrite, r.TOutput, r.TReasoning, cost); err != nil {
+		return fmt.Errorf("upsert rollup: %w", err)
+	}
+	return nil
+}
+
+func writeItemMetadata(ctx context.Context, tx *sql.Tx, it Item) error {
+	if q := it.Quota; q != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO quota_snapshots (credential, auth_id, provider, observed_at_ms, snapshot_json)
+VALUES (?,?,?,?,?) ON CONFLICT(credential) DO UPDATE SET auth_id=excluded.auth_id, provider=excluded.provider,
+observed_at_ms=excluded.observed_at_ms, snapshot_json=excluded.snapshot_json WHERE excluded.observed_at_ms >= quota_snapshots.observed_at_ms`,
+			q.Credential, nullStr(q.AuthID), q.Provider, q.ObservedAtMS, string(q.SnapshotJSON)); err != nil {
+			return fmt.Errorf("upsert quota: %w", err)
+		}
+	}
+	if c := it.Card; c != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO rate_cards (id, catalog_ref, card_json, feed_etag, first_seen_ms) VALUES (?,?,?,?,?)`,
+			c.ID, c.CatalogRef, string(c.JSON), nullStr(c.FeedETag), nowMS()); err != nil {
+			return fmt.Errorf("insert rate card: %w", err)
+		}
+	}
+	if l := it.Learned; l != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO learned_models (model, catalog_provider, updated_ms) VALUES (?,?,?)
+ON CONFLICT(model) DO UPDATE SET catalog_provider=excluded.catalog_provider, updated_ms=excluded.updated_ms`,
+			l.Model, l.Provider, nowMS()); err != nil {
+			return fmt.Errorf("upsert learned: %w", err)
+		}
+	}
+	return nil
 }
 
 func nullStr(s string) any {

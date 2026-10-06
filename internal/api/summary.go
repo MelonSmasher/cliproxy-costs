@@ -75,7 +75,15 @@ func (c storedCard) inputRate(tierAbove int64) *float64 {
 	return nil
 }
 
-func round9(v float64) *float64 { return new(math.Round(v*1e9) / 1e9) }
+func round9(v float64) *float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
+	if math.Abs(v) > math.MaxFloat64/1e9 {
+		return new(v)
+	}
+	return new(math.Round(v*1e9) / 1e9)
+}
 
 type unpricedModel struct {
 	Model    string `json:"model"`
@@ -107,17 +115,25 @@ type acc struct {
 	requests, failed, unpriced int64
 	tok                        tokens
 	cost                       float64
+	overflow                   bool
 }
 
 func (a *acc) add(x store.Agg) {
-	a.requests += x.Requests
-	a.failed += x.Failed
-	a.unpriced += x.Unpriced
-	a.tok.Input += x.TInput
-	a.tok.CacheRead += x.TCacheRead
-	a.tok.CacheWrite += x.TCacheWrite
-	a.tok.Output += x.TOutput
-	a.tok.Reasoning += x.TR
+	add := func(dst *int64, value int64) {
+		if value < 0 || *dst > math.MaxInt64-value {
+			a.overflow = true
+			return
+		}
+		*dst += value
+	}
+	add(&a.requests, x.Requests)
+	add(&a.failed, x.Failed)
+	add(&a.unpriced, x.Unpriced)
+	add(&a.tok.Input, x.TInput)
+	add(&a.tok.CacheRead, x.TCacheRead)
+	add(&a.tok.CacheWrite, x.TCacheWrite)
+	add(&a.tok.Output, x.TOutput)
+	add(&a.tok.Reasoning, x.TR)
 	a.cost += x.Cost
 }
 
@@ -244,6 +260,9 @@ func summary(ctx context.Context, v *View, q url.Values) (any, error) {
 		}
 	}
 
+	if tot.overflow {
+		return nil, &apiError{503, "numeric_overflow", "token totals exceed the supported range; narrow the time range"}
+	}
 	var lat, ttft map[string][]float64
 	if fromRaw {
 		samples, truncated, err := v.Store.Samples(ctx, sinceMS, untilMS, maxPercentileRows)
@@ -304,7 +323,7 @@ func summary(ctx context.Context, v *View, q url.Values) (any, error) {
 			if rate == nil {
 				continue
 			}
-			s := float64(b.TCacheRead+b.TCacheWrite)**rate/1e6 - (b.CCacheRead + b.CCacheWrite)
+			s := (float64(b.TCacheRead)+float64(b.TCacheWrite))/1e6**rate - (b.CCacheRead + b.CCacheWrite)
 			sum += s
 			priced = true
 			if !isTimeGroup(grp) {

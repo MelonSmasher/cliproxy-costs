@@ -28,17 +28,22 @@ const StreamHeaderInitIndex = -1
 
 // Method names handled or called by the plugin.
 const (
-	MethodRegister           = "plugin.register"
-	MethodReconfigure        = "plugin.reconfigure"
-	MethodQuiesce            = "plugin.quiesce"
-	MethodShutdown           = "plugin.shutdown"
-	MethodUsageHandle        = "usage.handle"
-	MethodInterceptAfter     = "response.intercept_after"
-	MethodInterceptChunk     = "response.intercept_stream_chunk"
-	MethodManagementRegister = "management.register"
-	MethodManagementHandle   = "management.handle"
-	MethodHostHTTPDo         = "host.http.do"
-	MethodHostLog            = "host.log"
+	MethodRegister              = "plugin.register"
+	MethodReconfigure           = "plugin.reconfigure"
+	MethodQuiesce               = "plugin.quiesce"
+	MethodShutdown              = "plugin.shutdown"
+	MethodUsageHandle           = "usage.handle"
+	MethodInterceptAfter        = "response.intercept_after"
+	MethodInterceptChunk        = "response.intercept_stream_chunk"
+	MethodManagementRegister    = "management.register"
+	MethodManagementHandle      = "management.handle"
+	MethodHostHTTPDo            = "host.http.do"
+	MethodHostHTTPDoStream      = "host.http.do_stream"
+	MethodHostHTTPStreamRead    = "host.http.stream_read"
+	MethodHostHTTPStreamClose   = "host.http.stream_close"
+	MethodHostHTTPOperationOpen = "host.http.operation_open"
+	MethodHostHTTPCancel        = "host.http.cancel"
+	MethodHostLog               = "host.log"
 )
 
 // LifecycleRequest is the payload of plugin.register and plugin.reconfigure.
@@ -206,9 +211,10 @@ type ManagementResponse struct {
 
 // HostHTTPRequest is the host.http.do payload.
 type HostHTTPRequest struct {
-	Method  string              `json:"method"`
-	URL     string              `json:"url"`
-	Headers map[string][]string `json:"headers,omitempty"`
+	OperationID string              `json:"operation_id,omitempty"`
+	Method      string              `json:"method"`
+	URL         string              `json:"url"`
+	Headers     map[string][]string `json:"headers,omitempty"`
 }
 
 // HostHTTPResponse is the host.http.do result.

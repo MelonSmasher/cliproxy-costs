@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1700000000,"model":"MODEL","choices":[{"index":0,"delta":{"role":"assistant","content":"Synthetic fixture OK"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1700000000,"model":"MODEL","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1700000000,"model":"MODEL","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":100,"total_tokens":1100,"prompt_tokens_details":{"cached_tokens":200},"completion_tokens_details":{"reasoning_tokens":20}}}
+
+data: [DONE]
+

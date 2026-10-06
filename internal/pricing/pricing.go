@@ -111,7 +111,7 @@ type TierJSON struct {
 
 // JSON returns the wire form of the rates.
 func (r Rates) JSON() RatesJSON {
-	return RatesJSON{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite}
+	return RatesJSON(r)
 }
 
 // TiersJSON returns the wire form of the card tiers (never nil).
@@ -136,11 +136,12 @@ func (c *Card) Ref() string {
 // stored in the rate_cards table.
 func (c *Card) CanonicalJSON() []byte {
 	b, _ := json.Marshal(struct {
-		Ref    string     `json:"ref"`
-		Source string     `json:"source"`
-		Rates  RatesJSON  `json:"rates"`
-		Tiers  []TierJSON `json:"tiers"`
-	}{c.Ref(), c.Source, c.Base.JSON(), c.TiersJSON()})
+		Ref                  string     `json:"ref"`
+		Source               string     `json:"source"`
+		Rates                RatesJSON  `json:"rates"`
+		Tiers                []TierJSON `json:"tiers"`
+		UnsupportedTierAbove int64      `json:"unsupported_tier_above,omitempty"`
+	}{c.Ref(), c.Source, c.Base.JSON(), c.TiersJSON(), c.UnsupportedTierAbove})
 	return b
 }
 
@@ -152,6 +153,9 @@ func cardID(c *Card) string {
 // Compute prices buckets with the card. Tier selection is strict: a tier
 // applies when prompt tokens > AbovePromptTokens; the highest such tier wins.
 func Compute(c *Card, b Buckets) Cost {
+	if c == nil || !ValidBuckets(b) {
+		return Cost{Status: StatusUnknown}
+	}
 	rates := c.Base
 	var tier *int64
 	p := b.PromptTokens()
@@ -160,6 +164,11 @@ func Compute(c *Card, b Buckets) Cost {
 			rates = c.Tiers[i].Rates
 			above := c.Tiers[i].AbovePromptTokens
 			tier = &above
+		}
+	}
+	for _, rate := range []*float64{rates.Input, rates.Output, rates.CacheRead, rates.CacheWrite} {
+		if rate != nil && (*rate < 0 || math.IsNaN(*rate) || math.IsInf(*rate, 0)) {
+			return Cost{Status: StatusUnknown}
 		}
 	}
 	partial := c.UnsupportedTierAbove > 0 && p > c.UnsupportedTierAbove
@@ -171,7 +180,7 @@ func Compute(c *Card, b Buckets) Cost {
 			partial = true
 			return 0
 		}
-		return round(float64(tokens) * *rate / 1e6)
+		return round((float64(tokens) / 1e6) * *rate)
 	}
 	cost := Cost{
 		Input:      price(b.Input, rates.Input),
@@ -181,6 +190,9 @@ func Compute(c *Card, b Buckets) Cost {
 		Tier:       tier,
 	}
 	cost.Total = round(cost.Input + cost.CacheRead + cost.CacheWrite + cost.Output)
+	if math.IsNaN(cost.Total) || math.IsInf(cost.Total, 0) {
+		return Cost{Status: StatusUnknown}
+	}
 	switch {
 	case partial:
 		cost.Status = StatusPartial
@@ -193,4 +205,9 @@ func Compute(c *Card, b Buckets) Cost {
 }
 
 // round trims float noise to 1e-12 USD so 0.00264 serializes as 0.00264.
-func round(v float64) float64 { return math.Round(v*1e12) / 1e12 }
+func round(v float64) float64 {
+	if v > math.MaxFloat64/1e12 {
+		return v
+	}
+	return math.Round(v*1e12) / 1e12
+}

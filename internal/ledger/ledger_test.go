@@ -106,3 +106,12 @@ func TestIngestPricesAndLearns(t *testing.T) {
 		t.Fatal("unknown model must have null cost")
 	}
 }
+
+func TestInvalidCountersRemainUnpriced(t *testing.T) {
+	res, learned := resolver(t)
+	rec := &abi.UsageRecord{RequestID: "invalid", Provider: "openai-compatible-x", Model: "gpt-x", RequestedAt: time.Now(), Detail: abi.UsageDetail{InputTokens: 5, CacheReadTokens: 10}}
+	out := Ingest(rec, nil, res, learned, "")
+	if r := out.Item.Row; r.CTotal != nil || r.PricingStatus != pricing.StatusUnknown || !r.TokenMismatch {
+		t.Fatalf("invalid counters falsely priced: %+v", r)
+	}
+}

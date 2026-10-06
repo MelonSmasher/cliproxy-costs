@@ -3,8 +3,12 @@ package catalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"math"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +29,66 @@ type fakeHost struct {
 	reqs    []abi.HostHTTPRequest
 }
 
+type callbackHost func(string, []byte) ([]byte, error)
+
+func (h callbackHost) Call(method string, req []byte) ([]byte, error) { return h(method, req) }
+
+func TestTimeoutCancelsHostAndKeepsLastGoodSnapshot(t *testing.T) {
+	h := &fakeHost{status: 200, etag: `"v1"`, body: []byte(feedV1)}
+	w, _, _ := setup(t, h)
+	w.FetchOnce(context.Background())
+	prev := w.State()
+	canceled := make(chan struct{})
+	var calls atomic.Int32
+	w.client = abi.NewHTTPClient(callbackHost(func(method string, req []byte) ([]byte, error) {
+		switch method {
+		case abi.MethodHostHTTPDoStream:
+			return abi.Fail("unknown_method", "streaming not supported by this fixture"), nil
+		case abi.MethodHostHTTPOperationOpen:
+			return abi.OK(map[string]string{"operation_id": "test-op"}), nil
+		case abi.MethodHostHTTPDo:
+			calls.Add(1)
+			<-canceled
+			// Even a successful late response must not replace the snapshot.
+			return abi.OK(abi.HostHTTPResponse{StatusCode: 200, Body: []byte(feedV2)}), nil
+		case abi.MethodHostHTTPCancel:
+			close(canceled)
+			return abi.OK(nil), nil
+		default:
+			return nil, errors.New("unexpected callback")
+		}
+	}))
+	w.Update(Settings{URL: prev.SourceURL, Refresh: time.Hour, Timeout: 50 * time.Millisecond, MaxBytes: 1 << 20})
+	w.FetchOnce(context.Background())
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("timeout did not cancel the host HTTP operation")
+	}
+	s := w.State()
+	if calls.Load() != 1 || !strings.Contains(s.Error, "timed out") || s.FetchedMS != prev.FetchedMS || rateOf(s) != 2 {
+		t.Fatalf("timeout did not keep the last good snapshot: calls=%d state=%+v", calls.Load(), s)
+	}
+}
+
+func TestNotModifiedPersistenceFailureIsVisible(t *testing.T) {
+	h := &fakeHost{status: 200, etag: `"v1"`, body: []byte(feedV1)}
+	w, _, _ := setup(t, h)
+	w.FetchOnce(context.Background())
+	if err := w.store.Close(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	h.status, h.body = 304, nil
+	w.FetchOnce(context.Background())
+	if s := w.State(); s.Status != "error" || !strings.Contains(s.Error, "persist snapshot") || rateOf(s) != 2 {
+		t.Fatalf("failed snapshot touch was hidden: %+v", s)
+	}
+}
+
 func (h *fakeHost) Call(method string, req []byte) ([]byte, error) {
+	if method != abi.MethodHostHTTPDo {
+		return abi.Fail("unknown_method", "unsupported callback"), nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lastReq = abi.HostHTTPRequest{}
@@ -33,6 +96,46 @@ func (h *fakeHost) Call(method string, req []byte) ([]byte, error) {
 	h.reqs = append(h.reqs, h.lastReq)
 	res, _ := json.Marshal(abi.HostHTTPResponse{StatusCode: h.status, Headers: map[string][]string{"Etag": {h.etag}}, Body: h.body})
 	return json.Marshal(abi.Envelope{OK: true, Result: res})
+}
+
+func TestNotModifiedMustMatchConditionalSnapshot(t *testing.T) {
+	for _, changeURL := range []bool{false, true} {
+		t.Run(map[bool]string{true: "changed URL", false: "missing validator"}[changeURL], func(t *testing.T) {
+			h := &fakeHost{status: 200, etag: `"v1"`, body: []byte(feedV1)}
+			w, _, _ := setup(t, h)
+			w.now = func() time.Time { return time.UnixMilli(1000) }
+			w.FetchOnce(context.Background())
+			prev := w.State()
+			if changeURL {
+				w.Update(Settings{URL: "https://example.invalid/other", Refresh: time.Hour, Timeout: time.Second, MaxBytes: 1 << 20})
+			} else {
+				prev.ETag = ""
+				w.set(prev)
+			}
+			h.status, h.body = 304, nil
+			w.now = func() time.Time { return time.UnixMilli(2000) }
+			w.FetchOnce(context.Background())
+			s := w.State()
+			if s.Status != "error" || !strings.Contains(s.Error, "HTTP 304") || s.FetchedMS != prev.FetchedMS || s.SourceURL != prev.SourceURL || rateOf(s) != 2 {
+				t.Fatalf("unconditional 304 must not refresh the previous snapshot: %+v", s)
+			}
+			if _, sent := h.lastReq.Headers["If-None-Match"]; sent {
+				t.Fatalf("unexpected conditional header: %+v", h.lastReq)
+			}
+			snap, err := w.store.LoadFeed(context.Background())
+			if err != nil || snap.FetchedMS != prev.FetchedMS {
+				t.Fatalf("persisted timestamp changed: %+v, %v", snap, err)
+			}
+		})
+	}
+}
+
+func TestDecodeInvalidSizeCap(t *testing.T) {
+	for _, cap := range []int64{-1, 0, math.MaxInt64} {
+		if _, err := Decode([]byte(feedV1), cap); err == nil {
+			t.Errorf("accepted invalid cap %d", cap)
+		}
+	}
 }
 
 func setup(t *testing.T, h *fakeHost) (*Worker, *State, string) {

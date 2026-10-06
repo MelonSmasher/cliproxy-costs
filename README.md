@@ -34,7 +34,8 @@ Non-goals: billing or blocking requests; pricing image/audio/search tariffs
 ## Compatibility
 
 - CLIProxyAPI v8 with native plugin ABI 1 / JSON schema 6 (developed against
-  commit `e5b5a1c`). CPA Home mode is not supported.
+  commit `e5b5a1c`). Native integration tests also target unmodified v8.0.15
+  (`a4acc9f752bd46571f737a10c04bf413656ab06b`). CPA Home mode is not supported.
 - Plugins run in-process; upgrading the plugin requires a CPA restart.
 - Linux amd64 and arm64 (glibc ≥ 2.34; release builds are made on Debian
   bookworm, the CPA container base), macOS amd64 and arm64 (12 or later), and
@@ -116,12 +117,46 @@ Full reference with examples: [`docs/api.md`](docs/api.md).
 - Responses include CPA's raw auth id (which may contain file names or e-mail
   addresses) next to the opaque auth index.
 
+## Interpreting cost and savings
+
+Amounts are **token-price estimates**, not provider invoices or proof of a
+subscription charge. The catalog and manual overrides determine the rates;
+check the rate source, model alias, context tier and missing-price indicators
+before comparing totals. A configured subscription price is an operator input,
+not a verified payment. Dropped records and unpriced requests make totals
+incomplete.
+
+With a front proxy such as `client → Headroom → CLIProxyAPI`, this plugin sees
+usage after compression. Its cache-savings estimate compares cache tariffs
+with uncached input tariffs; it does **not** measure Headroom compression
+savings. That comparison needs original and compressed token counts, matching
+rates and trustworthy request correlation from the front proxy. Do not treat
+client-supplied savings headers as accounting evidence. Check both streaming
+and non-streaming paths: another proxy can filter the injected response
+headers even when it preserves usage events.
+
+For ledger/dashboard-only operation without adding fields to client responses:
+
+```yaml
+inject:
+  body: false
+  headers: false
+```
+
+Keep the management endpoint private. Its key grants CPA administration, not
+read-only access to one client's ledger. Protect the database and backups:
+raw rows include account, session and request identifiers; daily rollups
+outlive raw-row retention. Existing directories must already have suitably
+restrictive permissions. External pricing and exchange-rate feeds receive
+fetch requests, not prompts, but remain trusted inputs to the estimates.
+
 ## Limitations
 
+- Native RPC envelopes are capped at 128 MiB before copying across the ABI.
 - Token tariffs only; the feed has no service-tier (flex/priority/batch)
   prices.
 - Cost injected into bodies is computed from the response's own usage. Many
-  clients ignore `usage.cost`; use the API for exact accounting.
+  clients ignore `usage.cost`; use the API for the recorded per-attempt estimates.
 - Streaming responses carry `X-CliProxy-Pricing` but no cost header (headers
   are sent before usage is known); the cost is in the final usage event.
 - Quota is passive: a credential appears after it serves a request whose
@@ -137,6 +172,7 @@ Requires Go (any recent version with `GOTOOLCHAIN=auto`; `go.mod` pins
 
 ```sh
 make check                    # vet, race tests, build for the host arch
+make integration CPA_BINARY=/path/to/cli-proxy-api # loopback synthetic fixtures
 make build GOARCH=arm64 CC=aarch64-linux-gnu-gcc
 ```
 

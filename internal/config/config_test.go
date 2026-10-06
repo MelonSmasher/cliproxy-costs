@@ -1,8 +1,11 @@
 package config
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultsAndProviderMapMerge(t *testing.T) {
@@ -18,6 +21,84 @@ func TestDefaultsAndProviderMapMerge(t *testing.T) {
 	}
 	if v, ok := LookupGlob(c.Pricing.ProviderMap, "openai-compatible-smoke"); !ok || v != "openai" {
 		t.Fatal("glob lookup")
+	}
+}
+
+func TestRejectsExtraYAMLDocuments(t *testing.T) {
+	for _, y := range []string{
+		"enabled: true\n---\nenabled: false\n",
+		"enabled: true\n---\n",
+		"enabled: true\n---\n[invalid",
+	} {
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Fatalf("accepted extra YAML document: %q", y)
+		}
+	}
+}
+
+func TestNumericValidationRejectsNonFiniteAndOverflow(t *testing.T) {
+	for _, field := range []string{
+		"pricing:\n  refresh-hours: %s\n",
+		"currency:\n  refresh-hours: %s\n",
+		"currency:\n  stale-after-hours: %s\n",
+		"quota:\n  stale-after-minutes: %s\n",
+	} {
+		for _, value := range []string{".nan", ".inf", "-.inf", "1e100", "1e-100", "0", "-1"} {
+			y := fmt.Sprintf(field, value)
+			if _, err := Parse([]byte(y)); err == nil {
+				t.Errorf("accepted invalid duration: %q", y)
+			}
+		}
+	}
+	for _, value := range []string{".nan", ".inf", "-.inf"} {
+		y := fmt.Sprintf("subscriptions: [{credential: '0123456789abcdef', usd-per-month: %s}]\n", value)
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Errorf("accepted invalid subscription price: %q", y)
+		}
+	}
+	for _, y := range []string{
+		fmt.Sprintf("pricing:\n  feed-timeout-seconds: %d\n", math.MaxInt64/int64(time.Second)+1),
+		fmt.Sprintf("pricing:\n  feed-max-bytes: %d\n", int64(math.MaxInt64)),
+		fmt.Sprintf("queue:\n  flush-ms: %d\n", math.MaxInt64/int64(time.Millisecond)+1),
+		fmt.Sprintf("stream-state:\n  ttl-seconds: %d\n", math.MaxInt64/int64(time.Second)+1),
+		fmt.Sprintf("retention:\n  raw-days: %d\n", math.MaxInt64/int64(24*time.Hour)+1),
+	} {
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Errorf("accepted overflowing size/duration: %q", y)
+		}
+	}
+}
+
+func TestURLValidation(t *testing.T) {
+	for _, field := range []string{"pricing:\n  feed-url: %q\n", "currency:\n  ecb-url: %q\n"} {
+		for _, raw := range []string{
+			"https://:443/feed", "https://example.invalid:70000/feed", "https://example.invalid:0/feed",
+			"https://example.invalid:/feed", "https://user:secret@example.invalid/feed",
+			"https://example.invalid/feed#ignored", "https:///feed", "file:///feed",
+		} {
+			if _, err := Parse([]byte(fmt.Sprintf(field, raw))); err == nil {
+				t.Errorf("accepted invalid feed URL %q", raw)
+			}
+		}
+		for _, raw := range []string{
+			"https://example.invalid/feed?version=1", "http://127.0.0.1:8080/feed",
+			"http://[::1]:8080/feed", "https://example.invalid:65535/feed",
+		} {
+			if _, err := Parse([]byte(fmt.Sprintf(field, raw))); err != nil {
+				t.Errorf("rejected supported feed URL %q: %v", raw, err)
+			}
+		}
+	}
+}
+
+func TestValidDurationBoundaries(t *testing.T) {
+	for _, unit := range []time.Duration{time.Minute, time.Hour} {
+		if validDuration(float64(math.MaxInt64)/float64(unit), unit) {
+			t.Errorf("accepted duration overflow for %s", unit)
+		}
+		if !validDuration(0.5, unit) || !validDuration(24, unit) {
+			t.Errorf("rejected ordinary positive duration for %s", unit)
+		}
 	}
 }
 

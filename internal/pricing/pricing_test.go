@@ -1,6 +1,8 @@
 package pricing
 
 import (
+	"bytes"
+	"fmt"
 	"math"
 	"testing"
 
@@ -286,5 +288,63 @@ func TestResolveUnknownAndPrefix(t *testing.T) {
 	}
 	if fam := r.Family("openai-compatible-foo"); fam != config.FamilyOpenAI {
 		t.Fatalf("family %q", fam)
+	}
+}
+
+func TestRejectImpossibleTokenCounters(t *testing.T) {
+	for name, tc := range map[string]struct {
+		family string
+		detail Detail
+	}{
+		"negative":                 {config.FamilyOpenAI, Detail{InputTokens: -1}},
+		"cache exceeds input":      {config.FamilyOpenAI, Detail{InputTokens: 10, CachedTokens: 11}},
+		"write exceeds remaining":  {config.FamilyOpenAI, Detail{InputTokens: 10, CacheReadTokens: 9, CacheCreationTokens: 2}},
+		"reasoning exceeds output": {config.FamilyOpenAI, Detail{OutputTokens: 10, ReasoningTokens: 11}},
+		"anthropic overflow":       {config.FamilyAnthropic, Detail{InputTokens: math.MaxInt64, CacheReadTokens: 1}},
+		"gemini overflow":          {config.FamilyGemini, Detail{OutputTokens: math.MaxInt64, ReasoningTokens: 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ValidDetail(tc.family, tc.detail) {
+				t.Fatal("invalid counters accepted")
+			}
+			if b, mismatch := NormalizeDetail(tc.family, tc.detail); b != (Buckets{}) || !mismatch {
+				t.Fatalf("unsafe normalization %+v, mismatch %v", b, mismatch)
+			}
+		})
+	}
+}
+
+func TestComputeRejectsInvalidValuesAndOverflow(t *testing.T) {
+	c := NewCard("openai", "m", SourceFeed, Rates{Input: p(1), Output: p(1)}, nil)
+	for _, b := range []Buckets{{Input: -1}, {Input: math.MaxInt64, Output: 1}, {Output: 1, Reasoning: 2}} {
+		if cost := Compute(c, b); cost.Status != StatusUnknown {
+			t.Fatalf("invalid buckets priced: %+v", cost)
+		}
+	}
+	for _, rate := range []float64{math.NaN(), math.Inf(1), -1, math.MaxFloat64} {
+		card := NewCard("openai", "m", SourceFeed, Rates{Input: &rate}, nil)
+		if cost := Compute(card, Buckets{Input: math.MaxInt64}); cost.Status != StatusUnknown {
+			t.Fatalf("invalid or overflowing price: %+v", cost)
+		}
+	}
+	if cost := Compute(nil, Buckets{}); cost.Status != StatusUnknown {
+		t.Fatalf("nil card: %+v", cost)
+	}
+}
+
+func TestUnsupportedTierChangesPersistedCardIdentity(t *testing.T) {
+	base := `{"openai":{"models":{"m":{"cost":{"input":1%s}}}}}`
+	plain, err := ParseFeed([]byte(fmt.Sprintf(base, "")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tiered, err := ParseFeed([]byte(fmt.Sprintf(base, `,"tiers":[{"input":2,"tier":{"type":"modality","size":10}}]`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := plain.Lookup("openai", "m")
+	b, _ := tiered.Lookup("openai", "m")
+	if a.ID == b.ID || !bytes.Contains(b.CanonicalJSON(), []byte(`"unsupported_tier_above":10`)) {
+		t.Fatalf("unsupported tier not identified: %s / %s: %s", a.ID, b.ID, b.CanonicalJSON())
 	}
 }

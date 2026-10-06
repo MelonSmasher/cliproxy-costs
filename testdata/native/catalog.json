@@ -1,0 +1,9 @@
+{
+  "openai": {
+    "models": {
+      "catalog-fixture": {
+        "cost": {"input": 4, "output": 20, "cache_read": 0.4, "cache_write": 5}
+      }
+    }
+  }
+}

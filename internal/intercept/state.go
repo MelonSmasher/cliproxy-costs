@@ -13,6 +13,8 @@ import (
 // stream is the per-stream state kept between chunks (schema 6 payload
 // chunks carry neither the request body nor history).
 type stream struct {
+	mu      sync.Mutex // serializes mutable usage state for concurrent callbacks
+	done    bool
 	format  string
 	card    *pricing.Card // nil when unknown
 	inject  bool
@@ -117,4 +119,16 @@ func (s *States) Len() int {
 		s.shards[i].mu.Unlock()
 	}
 	return n
+}
+
+// deleteIf avoids a late callback deleting a replacement stream with the
+// same request id after a repeated header-init.
+func (s *States) deleteIf(key string, expected *stream) {
+	sh := s.shard(key)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.items[key] == expected {
+		sh.order.Remove(expected.elem)
+		delete(sh.items, key)
+	}
 }

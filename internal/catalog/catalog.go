@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"sync"
@@ -25,6 +26,9 @@ var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 // Decode turns a fetched body into feed JSON: zstd (by magic) is decoded with
 // a decoded-size cap; plain JSON must start with '{' and respect the cap.
 func Decode(body []byte, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 || maxBytes == math.MaxInt64 {
+		return nil, errors.New("invalid decoded feed size limit")
+	}
 	switch {
 	case bytes.HasPrefix(body, zstdMagic):
 		dec, err := zstd.NewReader(bytes.NewReader(body), zstd.WithDecoderMaxMemory(uint64(maxBytes)), zstd.WithDecoderConcurrency(1))
@@ -76,9 +80,9 @@ type Settings struct {
 
 // Worker owns the feed lifecycle.
 type Worker struct {
-	host  abi.Host
-	store *store.Store
-	now   func() time.Time
+	client *abi.HTTPClient
+	store  *store.Store
+	now    func() time.Time
 	// publish is called with every new state (including error changes).
 	publish func(State)
 
@@ -94,7 +98,7 @@ type Worker struct {
 
 // New creates a worker. publish must be cheap and non-blocking.
 func New(host abi.Host, st *store.Store, s Settings, publish func(State)) *Worker {
-	return &Worker{host: host, store: st, now: time.Now, publish: publish, settings: s, wake: make(chan struct{}, 1), state: State{Status: "none"}}
+	return &Worker{client: abi.NewHTTPClient(host), store: st, now: time.Now, publish: publish, settings: s, wake: make(chan struct{}, 1), state: State{Status: "none"}}
 }
 
 // Load installs the persisted snapshot (if any) and the persisted status.
@@ -173,9 +177,15 @@ func (w *Worker) Run(ctx context.Context) {
 				due = min(due, 5*time.Minute)
 			}
 		case st.Error == "" && st.FetchedMS > 0 && st.SourceURL == s.URL:
-			age := w.now().Sub(time.UnixMilli(st.FetchedMS))
+			age := max(time.Duration(0), w.now().Sub(time.UnixMilli(st.FetchedMS)))
 			jitter := time.Duration(float64(s.Refresh) * (rand.Float64()*0.1 - 0.05))
-			due = max(0, s.Refresh-age+jitter)
+			interval := s.Refresh
+			if jitter > 0 && interval > time.Duration(math.MaxInt64)-jitter {
+				interval = time.Duration(math.MaxInt64)
+			} else {
+				interval += jitter
+			}
+			due = max(0, interval-age)
 		}
 		if due > 0 {
 			t := time.NewTimer(due)
@@ -227,7 +237,9 @@ func (w *Worker) FetchOnce(ctx context.Context) {
 			st.Error, st.Status = "persist snapshot: "+err.Error(), "error"
 		}
 	} else if touched {
-		_ = w.store.TouchFeed(bg, st.FetchedMS)
+		if err := w.store.TouchFeed(bg, st.FetchedMS); err != nil {
+			st.Error, st.Status = "persist snapshot: "+err.Error(), "error"
+		}
 	}
 	_ = w.store.SetFeedStatus(bg, attempt.UnixMilli(), st.Error)
 	w.set(st)
@@ -238,26 +250,18 @@ func (w *Worker) fetch(ctx context.Context, s Settings, prev State) (State, *sto
 	if prev.ETag != "" && prev.Catalog != nil && prev.SourceURL == s.URL {
 		headers["If-None-Match"] = []string{prev.ETag}
 	}
-	var resp abi.HostHTTPResponse
-	errc := make(chan error, 1)
-	go func() {
-		errc <- abi.CallResult(w.host, abi.MethodHostHTTPDo, abi.HostHTTPRequest{Method: http.MethodGet, URL: s.URL, Headers: headers}, &resp)
-	}()
-	timer := time.NewTimer(s.Timeout)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return prev, nil, false, ctx.Err()
-	case <-timer.C:
+	fetchCtx, cancel := context.WithTimeout(ctx, s.Timeout)
+	defer cancel()
+	resp, err := w.client.Do(fetchCtx, abi.HostHTTPRequest{Method: http.MethodGet, URL: s.URL, Headers: headers}, s.MaxBytes)
+	if errors.Is(err, context.DeadlineExceeded) {
 		return prev, nil, false, fmt.Errorf("feed fetch timed out after %s", s.Timeout)
-	case err := <-errc:
-		if err != nil {
-			return prev, nil, false, fmt.Errorf("feed fetch: %w", err)
-		}
+	}
+	if err != nil {
+		return prev, nil, false, fmt.Errorf("feed fetch: %w", err)
 	}
 	now := w.now().UnixMilli()
 	switch {
-	case resp.StatusCode == http.StatusNotModified && prev.Catalog != nil:
+	case resp.StatusCode == http.StatusNotModified && prev.Catalog != nil && prev.SourceURL == s.URL && prev.ETag != "":
 		prev.FetchedMS, prev.Status, prev.Error = now, "ok", ""
 		return prev, nil, true, nil
 	case resp.StatusCode != http.StatusOK:

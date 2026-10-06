@@ -114,12 +114,14 @@ func Ingest(rec *abi.UsageRecord, secret []byte, res *pricing.Resolver, learned 
 	if r.Card == nil && model != rec.Model && rec.Model != "" {
 		r = res.Resolve(rec.Provider, rec.Model)
 	}
-	if r.Card == nil {
+	if r.Card == nil || !pricing.ValidDetail(family, pricing.Detail(rec.Detail)) {
 		row.PricingStatus = pricing.StatusUnknown
 	} else {
 		c := pricing.Compute(r.Card, b)
 		row.PricingStatus = c.Status
-		row.CInput, row.CCacheRead, row.CCacheWrite, row.COutput, row.CTotal = new(c.Input), new(c.CacheRead), new(c.CacheWrite), new(c.Output), new(c.Total)
+		if c.Status != pricing.StatusUnknown {
+			row.CInput, row.CCacheRead, row.CCacheWrite, row.COutput, row.CTotal = new(c.Input), new(c.CacheRead), new(c.CacheWrite), new(c.Output), new(c.Total)
+		}
 		id, ref := r.Card.ID, r.Card.Ref()
 		row.RateCardID, row.CatalogRef, row.TierAbove = new(id), new(ref), c.Tier
 		etag := ""

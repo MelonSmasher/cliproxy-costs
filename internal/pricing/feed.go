@@ -92,7 +92,7 @@ func ParseFeed(data []byte) (*Catalog, error) {
 }
 
 func (r feedRates) rates() (Rates, error) {
-	out := Rates{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite}
+	out := Rates(r)
 	for _, p := range []*float64{r.Input, r.Output, r.CacheRead, r.CacheWrite} {
 		if p != nil && (*p < 0 || math.IsNaN(*p) || math.IsInf(*p, 0)) {
 			return out, errors.New("negative or non-finite rate")
@@ -149,6 +149,7 @@ func feedCard(provider, model string, c *feedCost) (*Card, error) {
 	card := NewCard(provider, model, SourceFeed, base, tiers)
 	if unsupportedAbove > 0 {
 		card.UnsupportedTierAbove = unsupportedAbove
+		card.ID = cardID(card)
 	}
 	return card, nil
 }

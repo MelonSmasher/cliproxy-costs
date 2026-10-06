@@ -3,6 +3,7 @@ package fx
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -94,6 +95,9 @@ type fakeHost struct {
 }
 
 func (h *fakeHost) Call(method string, req []byte) ([]byte, error) {
+	if method != abi.MethodHostHTTPDo {
+		return abi.Fail("unknown_method", "unsupported callback"), nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var r abi.HostHTTPRequest
@@ -101,6 +105,54 @@ func (h *fakeHost) Call(method string, req []byte) ([]byte, error) {
 	h.reqs = append(h.reqs, r)
 	res, _ := json.Marshal(abi.HostHTTPResponse{StatusCode: h.status, Headers: http.Header{"Last-Modified": {"Wed, 30 Sep 2026 13:56:50 GMT"}}, Body: []byte(h.body)})
 	return json.Marshal(abi.Envelope{OK: true, Result: res})
+}
+
+func TestRatesNeverPublishesNonFiniteOrNonPositiveValues(t *testing.T) {
+	for name, perEUR := range map[string]map[string]float64{
+		"overflow":    {"USD": math.SmallestNonzeroFloat64, "CNY": math.MaxFloat64},
+		"underflow":   {"USD": math.MaxFloat64, "CNY": math.SmallestNonzeroFloat64},
+		"infinity":    {"USD": 1, "CNY": math.Inf(1)},
+		"invalid USD": {"USD": math.Inf(1), "CNY": 7},
+		"NaN":         {"USD": math.NaN(), "CNY": 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := Rates([]string{"USD", "EUR", "CNY", "JPY"}, perEUR, map[string]float64{"CNY": 7, "JPY": math.Inf(1)})
+			if got["CNY"] != 7 || got["USD"] != 1 {
+				t.Fatalf("invalid ECB conversion did not use fixed fallback: %v", got)
+			}
+			for code, rate := range got {
+				if !(rate > 0) || math.IsInf(rate, 0) {
+					t.Errorf("invalid rate %s=%v", code, rate)
+				}
+			}
+			if _, err := json.Marshal(got); err != nil {
+				t.Fatalf("rates cannot be encoded: %v", err)
+			}
+		})
+	}
+}
+
+func TestNotModifiedFromChangedURLKeepsTimestampAndOldSnapshot(t *testing.T) {
+	st := open(t, filepath.Join(t.TempDir(), "l.db"))
+	defer st.Close(time.Second)
+	h := &fakeHost{status: 200, body: ecbDoc}
+	w := New(h, st, settings, func(State) {})
+	w.now = func() time.Time { return time.UnixMilli(1000) }
+	w.FetchOnce(context.Background())
+	prev := w.State()
+	changed := settings
+	changed.URL = "https://example.invalid/other"
+	w.Update(changed)
+	h.status, h.body = 304, ""
+	w.now = func() time.Time { return time.UnixMilli(2000) }
+	w.FetchOnce(context.Background())
+	s := w.State()
+	if !strings.Contains(s.Error, "HTTP 304") || s.Snapshot.FetchedMS != prev.Snapshot.FetchedMS || s.Snapshot.URL != prev.Snapshot.URL {
+		t.Fatalf("unconditional 304 must preserve the snapshot: %+v", s)
+	}
+	if _, sent := h.reqs[1].Headers["If-Modified-Since"]; sent {
+		t.Fatalf("unexpected conditional header: %+v", h.reqs[1])
+	}
 }
 
 func open(t *testing.T, path string) *store.Store {
@@ -164,6 +216,7 @@ func TestDisabledWorkerDoesNotFetchAndStopsOnCancel(t *testing.T) {
 	off.Enabled = false
 	w := New(h, st, off, func(State) {})
 	_ = w.Load(context.Background())
+	w.FetchOnce(context.Background()) // explicit refresh must respect disabled mode too
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { w.Run(ctx); close(done) }()
@@ -187,5 +240,21 @@ func TestDisabledWorkerDoesNotFetchAndStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not stop on cancel")
+	}
+}
+
+func TestNotModifiedPersistenceFailureIsVisible(t *testing.T) {
+	st := open(t, filepath.Join(t.TempDir(), "l.db"))
+	defer st.Close(time.Second)
+	h := &fakeHost{status: 200, body: ecbDoc}
+	w := New(h, st, settings, func(State) {})
+	w.FetchOnce(context.Background())
+	if err := st.Close(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	h.status, h.body = 304, ""
+	w.FetchOnce(context.Background())
+	if s := w.State(); !strings.Contains(s.Error, "persist snapshot") || s.Snapshot == nil || s.Snapshot.PerEUR["CNY"] != 7.613 {
+		t.Fatalf("failed snapshot touch was hidden: %+v", s)
 	}
 }
